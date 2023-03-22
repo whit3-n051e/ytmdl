@@ -76,30 +76,6 @@ pub fn log<T: Debug>(content: T, filename: &str) {
 	write_file(content_b, filename).expect("Failed to log.");
 }
 
-#[allow(dead_code)]
-pub struct AdaptiveAudioStream {
-	duration_ms: u64,
-	audio_channels: u64,
-	audio_quality: String,
-	audio_sample_rate: u64,
-	average_bitrate: u64,
-	bitrate: u64,
-	content_length: u64,
-	high_replication: bool,
-	itag: u64,
-	loudness_db: f64,
-	mime_type: String,
-	url: String
-}
-
-#[allow(dead_code)]
-pub struct VideoMeta {
-	is_live: bool,
-	is_private: bool,
-	title: String,
-	adaptive_audio_streams: Vec<AdaptiveAudioStream>
-}
-
 pub trait Grab {
 	fn grab_b(&self, key: &str) -> bool;
 	fn grab_s(&self, key: &str) -> String;
@@ -130,8 +106,34 @@ impl Grab for Value {
 	}
 }
 
+#[allow(dead_code)]
+pub struct AdaptiveAudioStream {
+	duration_ms: u64,
+	audio_channels: u64,
+	audio_quality: String,
+	audio_sample_rate: u64,
+	average_bitrate: u64,
+	bitrate: u64,
+	content_length: u64,
+	high_replication: bool,
+	itag: u64,
+	loudness_db: f64,
+	mime_type: String,
+	url: String
+}
+
+#[allow(dead_code)]
+pub struct VideoMeta {
+	is_live: bool,
+	is_private: bool,
+	title: String,
+	adaptive_audio_streams: Vec<AdaptiveAudioStream>
+}
+
+
+
 impl AdaptiveAudioStream {
-	pub fn array_from_value(streaming_data: &Value) -> Vec<Self> {
+	pub fn from_sd(streaming_data: &Value) -> Vec<Self> {
 		let af: &Vec<Value> = streaming_data
 			.get("adaptiveFormats")
 			.expect("Could not find streams for the video.")
@@ -171,12 +173,11 @@ impl VideoMeta {
 		let streaming_data: &Value = video_data.get("streamingData").expect("");
 		
 		let video_meta: Self = Self {
-			is_live: video_details.get("isLiveContent").expect("").as_bool().expect(""),
-			is_private: video_details.get("isPrivate").expect("").as_bool().expect(""),
-			title: String::from(video_details.get("title").expect("").as_str().expect("")),
-			adaptive_audio_streams: AdaptiveAudioStream::array_from_value(streaming_data)
+			is_live: video_details.grab_b("isLiveContent"),
+			is_private: video_details.grab_b("isPrivate"),
+			title: video_details.grab_s("title"),
+			adaptive_audio_streams: AdaptiveAudioStream::from_sd(streaming_data)
 		};
 		Ok(video_meta)
 	}
 }
-
