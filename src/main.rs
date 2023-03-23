@@ -7,5 +7,6 @@ extern crate tokio;
 
 #[tokio::main]
 async fn main() {
-    println!("Hello, world!")
+    let vm = ytmdl::VideoMeta::from_vid("BTYAsjAVa3I").await.expect("AAAH");
+    ytmdl::log(vm, "log.txt").expect("AAAAH");
 }
