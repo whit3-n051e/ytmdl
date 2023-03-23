@@ -1,13 +1,14 @@
-
 extern crate hyper;
 extern crate hyper_tls;
 extern crate tokio;
 extern crate serde_json;
 extern crate regex;
 
+// VERY important constants
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\?v(?:i)?=|\&v(?:i)?=))([^#\&\?]*).*";
 
+// Imports
 use hyper::{
 	Client, 
 	Body,
@@ -117,7 +118,7 @@ pub fn write_file(content: &[u8], name: &str) -> Result<(), Error> {
 		Err(err) => return Err(err)
 	};
 }
-pub fn url_to_vid(url: &str) -> Result<&str, Error> {
+pub fn to_vid(url: &str) -> Result<&str, Error> {
 	let err: Error = Error::from(ErrorKind::InvalidInput);
 	if url.len() == 11 {
 		return Ok(url);
@@ -229,7 +230,11 @@ impl AdaptiveAudioStream {
 	}
 }
 impl VideoMeta {
-	pub async fn from_vid(vid: &str) -> Result<Self, Error> {
+	pub async fn from_vid(url: &str) -> Result<Self, Error> {
+		let vid: &str = match to_vid(url) {
+			Ok(val) => val,
+			Err(err) => return Err(err)
+		};
 		let err: Error = Error::from(ErrorKind::InvalidData);
 		let video_data: Value = get_video_data(vid).await?;
 		let video_details: &Value = match video_data.get("videoDetails") {
@@ -253,6 +258,31 @@ impl VideoMeta {
 		};
 
 		Ok(video_meta)
+	}
+	pub fn get_dl_data(&self) -> Result<(&str, &AdaptiveAudioStream), Error> {
+		if self.is_live {
+			return Err(Error::new(
+				ErrorKind::Other,
+				"This is a livestream, unable to download."
+			))
+		};
+		if self.is_private {
+			return Err(Error::new(
+				ErrorKind::Other,
+				"This video is private, unable to download."
+			))
+		};
+		let streams: &Vec<AdaptiveAudioStream> = &self.adaptive_audio_streams;
+		let mut mqsi: usize = 0;
+		for i in 1..streams.len() {
+			if streams[i].bitrate > streams[mqsi].bitrate {
+				mqsi = i;
+			}
+		};
+		Ok((
+			&self.title,
+			&streams[mqsi]
+		))
 	}
 }
 
