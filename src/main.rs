@@ -5,8 +5,9 @@ use serde_json::{Value, json};
 extern crate ytmdl;
 extern crate tokio;
 
+// Sample vid: "BTYAsjAVa3I"
+
 #[tokio::main]
 async fn main() {
-    let vm = ytmdl::VideoMeta::from_vid("BTYAsjAVa3I").await.expect("AAAH");
-    ytmdl::log(vm, "log.txt").expect("AAAAH");
+    
 }

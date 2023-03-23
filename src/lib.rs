@@ -33,6 +33,24 @@ use regex::{
 	Match
 };
 
+// Debug functions
+pub fn log<T: Debug>(content: T, filename: &str) -> Result<(), Error> {
+	let content_s: String = format!("{:#?}", content);
+	let content_b: &[u8] = content_s.as_bytes();
+	match write_file(content_b, filename) {
+		Ok(_) => return Ok(()),
+		Err(err) => return Err(err)
+	};
+}
+pub fn read_line() -> Result<String, Error> {
+	let mut s: String = String::new();
+	match std::io::stdin().read_line(&mut s) {
+		Ok(_) => return Ok(s),
+		Err(err) => return Err(err)
+	};
+}
+
+// Important functions
 pub async fn send_request(method: Method, url: &str, header: (&str, &str), body: &Value) -> Result<Value, Error> {
 	let err: Error = Error::from(ErrorKind::InvalidData);
 	let https: HttpsConnector<HttpConnector> = HttpsConnector::new();
@@ -99,22 +117,7 @@ pub fn write_file(content: &[u8], name: &str) -> Result<(), Error> {
 		Err(err) => return Err(err)
 	};
 }
-pub fn log<T: Debug>(content: T, filename: &str) -> Result<(), Error> {
-	let content_s: String = format!("{:#?}", content);
-	let content_b: &[u8] = content_s.as_bytes();
-	match write_file(content_b, filename) {
-		Ok(_) => return Ok(()),
-		Err(err) => return Err(err)
-	};
-}
-pub fn read_line() -> Result<String, Error> {
-	let mut s: String = String::new();
-	match std::io::stdin().read_line(&mut s) {
-		Ok(_) => return Ok(s),
-		Err(err) => return Err(err)
-	};
-}
-pub fn to_vid(url: &str) -> Result<&str, Error> {
+pub fn url_to_vid(url: &str) -> Result<&str, Error> {
 	let err: Error = Error::from(ErrorKind::InvalidInput);
 	if url.len() == 11 {
 		return Ok(url);
@@ -135,6 +138,7 @@ pub fn to_vid(url: &str) -> Result<&str, Error> {
 	}
 }
 
+// One trait to rule them all
 pub trait Grab {
 	fn grab_b(&self, key: &str) -> bool;
 	fn grab_s(&self, key: &str) -> String;
@@ -164,6 +168,7 @@ impl Grab for Value {
 	}
 }
 
+// Structs to get video metadata
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct AdaptiveAudioStream {
@@ -223,7 +228,6 @@ impl AdaptiveAudioStream {
 		Some(aas_vec)
 	}
 }
-
 impl VideoMeta {
 	pub async fn from_vid(vid: &str) -> Result<Self, Error> {
 		let err: Error = Error::from(ErrorKind::InvalidData);
@@ -252,4 +256,3 @@ impl VideoMeta {
 	}
 }
 
-// Download struct:
