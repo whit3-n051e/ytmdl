@@ -39,16 +39,16 @@ pub fn log<T: Debug>(content: T, filename: &str) -> Result<(), Error> {
 	let content_s: String = format!("{:#?}", content);
 	let content_b: &[u8] = content_s.as_bytes();
 	match write_file(content_b, filename) {
-		Ok(_) => return Ok(()),
-		Err(err) => return Err(err)
-	};
+		Ok(_) => Ok(()),
+		Err(err) => Err(err)
+	}
 }
 pub fn read_line() -> Result<String, Error> {
 	let mut s: String = String::new();
 	match std::io::stdin().read_line(&mut s) {
-		Ok(_) => return Ok(s),
-		Err(err) => return Err(err)
-	};
+		Ok(_) => Ok(s),
+		Err(err) => Err(err)
+	}
 }
 
 // Important functions
@@ -59,28 +59,28 @@ pub async fn send_request(method: Method, url: &str, header: (&str, &str), body:
 		.build::<_, Body>(https);
 
 	match serde_json::to_string(body) {	
-		Err(_) => return Err(err),
+		Err(_) => Err(err),
 		Ok(val) => match Request::builder()
 			.method(method)
 			.uri(url)
 			.header(header.0, header.1)
 			.body(Body::from(val)) {
-				Err(_) => return Err(err),
+				Err(_) => Err(err),
 				Ok(val) => match client.request(val).await {
-					Err(_) => return Err(err),
+					Err(_) => Err(err),
 					Ok(val) => match to_bytes(val.into_body()).await {
-						Err(_) => return Err(err),
+						Err(_) => Err(err),
 						Ok(val) => match String::from_utf8(val.to_vec()) {
-							Err(_) => return Err(err),
+							Err(_) => Err(err),
 							Ok(val) => match serde_json::from_str(&val) {
-								Err(_) => return Err(err),
-								Ok(val) => return Ok(val)
+								Err(_) => Err(err),
+								Ok(val) => Ok(val)
 						}
 					}
 				}
 			}
 		}
-	};
+	}
 }
 pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
 	let header: (&str, &str) = ("user-agent", "");
@@ -100,9 +100,9 @@ pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
 	let url: String = format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY);
 	let resp: Result<Value, Error> = send_request(method, &url, header, &body).await;
 	match resp {
-		Ok(val) => return Ok(val),
-		Err(err) => return Err(err)
-	};
+		Ok(val) => Ok(val),
+		Err(err) => Err(err)
+	}
 }
 pub fn write_file(content: &[u8], name: &str) -> Result<(), Error> {
 	let mut file: File = match File::create(name) {
@@ -114,9 +114,9 @@ pub fn write_file(content: &[u8], name: &str) -> Result<(), Error> {
 		Err(err) => return Err(err)
 	}
 	match file.sync_all() {
-		Ok(_) => return Ok(()),
-		Err(err) => return Err(err)
-	};
+		Ok(_) => Ok(()),
+		Err(err) => Err(err)
+	}
 }
 pub fn to_vid(url: &str) -> Result<&str, Error> {
 	let err: Error = Error::from(ErrorKind::InvalidInput);
@@ -171,11 +171,10 @@ impl Grab for Value {
 
 // Structs to get video metadata
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AdaptiveAudioStream {
 	duration_ms: u64,
 	audio_channels: u64,
-	audio_quality: String,
 	audio_sample_rate: u64,
 	average_bitrate: u64,
 	bitrate: u64,
@@ -190,10 +189,8 @@ pub struct AdaptiveAudioStream {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct VideoMeta {
-	is_live: bool,
-	is_private: bool,
 	title: String,
-	adaptive_audio_streams: Vec<AdaptiveAudioStream>
+	stream: AdaptiveAudioStream
 }
 
 impl AdaptiveAudioStream {
@@ -209,11 +206,10 @@ impl AdaptiveAudioStream {
 
 		for stream in af {
 			let check_val: Option<&Value> = stream.get("audioQuality");
-			if check_val != None {
+			if check_val.is_some() {
 				aas_vec.push(Self {
 					duration_ms: stream.grab_s("approxDurationMs").parse().unwrap_or_default(),
 					audio_channels: stream.grab_n("audioChannels"),
-					audio_quality: stream.grab_s("audioQuality"),
 					audio_sample_rate: stream.grab_s("audioSampleRate").parse().unwrap_or_default(),
 					average_bitrate: stream.grab_n("averageBitrate"),
 					bitrate: stream.grab_n("bitrate"),
@@ -230,59 +226,48 @@ impl AdaptiveAudioStream {
 	}
 }
 impl VideoMeta {
-	pub async fn from_vid(url: &str) -> Result<Self, Error> {
+	pub async fn get(url: &str) -> Result<Self, Error> {
 		let vid: &str = match to_vid(url) {
 			Ok(val) => val,
 			Err(err) => return Err(err)
 		};
-		let err: Error = Error::from(ErrorKind::InvalidData);
+		let dataerror: Error = Error::from(ErrorKind::InvalidData);
 		let video_data: Value = get_video_data(vid).await?;
+
 		let video_details: &Value = match video_data.get("videoDetails") {
 			Some(val) => val,
-			None => return Err(err)
+			None => return Err(dataerror)
+		};
+
+		if video_details.grab_b("isLiveContent") || video_details.grab_b("isPrivate") {
+			return Err(dataerror);
 		};
 
 		let streaming_data: &Value = match video_data.get("streamingData") {
 			Some(val) => val,
-			None => return Err(err)
+			None => return Err(dataerror)
 		};
+
+		let streams: Vec<AdaptiveAudioStream> = match AdaptiveAudioStream::from_sd(streaming_data) {
+			Some(val) => val,
+			None => return Err(dataerror)
+		};
+
+		let mut max_quality_stream_index: usize = 0;
+
+		for i in 1..streams.len() {
+			if streams[i].bitrate > streams[max_quality_stream_index].bitrate {
+				max_quality_stream_index = i;
+			}
+		};
+
+		let best_stream: AdaptiveAudioStream = streams[max_quality_stream_index].clone();
 		
 		let video_meta: Self = Self {
-			is_live: video_details.grab_b("isLiveContent"),
-			is_private: video_details.grab_b("isPrivate"),
 			title: video_details.grab_s("title"),
-			adaptive_audio_streams: match AdaptiveAudioStream::from_sd(streaming_data) {
-				Some(val) => val,
-				None => return Err(err)
-			}
+			stream: best_stream
 		};
 
 		Ok(video_meta)
 	}
-	pub fn get_dl_data(&self) -> Result<(&str, &AdaptiveAudioStream), Error> {
-		if self.is_live {
-			return Err(Error::new(
-				ErrorKind::Other,
-				"This is a livestream, unable to download."
-			))
-		};
-		if self.is_private {
-			return Err(Error::new(
-				ErrorKind::Other,
-				"This video is private, unable to download."
-			))
-		};
-		let streams: &Vec<AdaptiveAudioStream> = &self.adaptive_audio_streams;
-		let mut mqsi: usize = 0;
-		for i in 1..streams.len() {
-			if streams[i].bitrate > streams[mqsi].bitrate {
-				mqsi = i;
-			}
-		};
-		Ok((
-			&self.title,
-			&streams[mqsi]
-		))
-	}
 }
-
