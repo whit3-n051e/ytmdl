@@ -4,10 +4,9 @@ extern crate tokio;
 extern crate serde_json;
 extern crate regex;
 
-// VERY important constants
+// Constants
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\?v(?:i)?=|\&v(?:i)?=))([^#\&\?]*).*";
-const DEFAULT_HEADER: (&str, &str) = ("user-agent", "");
 
 // Imports
 use hyper::{
@@ -36,11 +35,11 @@ use regex::{
 	Match
 };
 
+// Enums, traits, structs
 pub enum AudioContainer {
 	M4A,
 	WEBM
 }
-
 
 pub trait Grab {
 	fn grab_b(&self, key: &str) -> bool;
@@ -50,31 +49,58 @@ pub trait Grab {
 	fn grab_a(&self, key: &str) -> Vec<Value>;
 }
 impl Grab for Value {
-	fn grab_b(&self, key: &str) -> bool {
-		let def_val: Value = json!(false);
-		let v: &Value = self.get(key).unwrap_or(&def_val);
+	fn grab_b(&self, index: &str) -> bool {
+		let default: Value = json!(false);
+		let v: &Value = self.get(index).unwrap_or(&default);
 		v.as_bool().unwrap_or_default()
 	}
-	fn grab_s(&self, key: &str) -> String {
-		let def_val: Value = json!("");
-		let v: &Value = self.get(key).unwrap_or(&def_val);
+	fn grab_s(&self, index: &str) -> String {
+		let default: Value = json!("");
+		let v: &Value = self.get(index).unwrap_or(&default);
 		String::from(v.as_str().unwrap_or_default())
 	}
-	fn grab_n(&self, key: &str) -> u64 {
-		let def_val: Value = json!(0);
-		let v: &Value = self.get(key).unwrap_or(&def_val);
+	fn grab_n(&self, index: &str) -> u64 {
+		let default: Value = json!(0);
+		let v: &Value = self.get(index).unwrap_or(&default);
 		v.as_u64().unwrap_or_default()
 	}
-	fn grab_f(&self, key: &str) -> f64 {
-		let def_val: Value = json!(0.);
-		let v: &Value = self.get(key).unwrap_or(&def_val);
+	fn grab_f(&self, index: &str) -> f64 {
+		let default: Value = json!(0.);
+		let v: &Value = self.get(index).unwrap_or(&default);
 		v.as_f64().unwrap_or_default()
 	}
-	fn grab_a(&self, key: &str) -> Vec<Value> {
-		let def_val: Value = json!([]);
-		let v: &Value = self.get(key).unwrap_or(&def_val);
+	fn grab_a(&self, index: &str) -> Vec<Value> {
+		let default: Value = json!([]);
+		let v: &Value = self.get(index).unwrap_or(&default);
 		v.as_array().unwrap().to_owned()
 	}
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct Meta {
+	title: String,
+	duration_ms: u64,
+	audio_channels: u64,
+	audio_sample_rate: u64,
+	average_bitrate: u64,
+	bitrate: u64,
+	content_length: u64,
+	high_replication: bool,
+	itag: u64,
+	loudness_db: f64,
+	mime_type: String,
+	url: String
+}
+pub struct Header {
+	key: String,
+	value: String
+}
+pub struct RequestData {
+	method: Method,
+	url: String,
+	header: Header,
+	body: Value
 }
 
 // Debug functions
@@ -145,17 +171,17 @@ pub fn best_stream(adaptive_streams: &[Value]) -> usize {
 }
 
 // Network functions
-pub async fn request(method: Method, url: &str, header: (&str, &str), body: &Value) -> Result<Response<Body>, Error> {
+pub async fn request(data: RequestData) -> Result<Response<Body>, Error> {
 	let error: Error = Error::from(ErrorKind::InvalidData);
 	let https: HttpsConnector<HttpConnector> = HttpsConnector::new();
 	let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
 		.build::<_, Body>(https);
-	match serde_json::to_string(body) {
+	match serde_json::to_string(&data.body) {
 		Err(_) => Err(error),
 		Ok(val) => match Request::builder()
-			.method(method)
-			.uri(url)
-			.header(header.0, header.1)
+			.method(data.method)
+			.uri(data.url)
+			.header(data.header.key, data.header.value)
 			.body(Body::from(val)) {
 				Err(_) => Err(error),
 				Ok(req) => match client.request(req).await {
@@ -167,7 +193,6 @@ pub async fn request(method: Method, url: &str, header: (&str, &str), body: &Val
 }
 pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
 	let error: Error = Error::from(ErrorKind::InvalidData);
-	let header: (&str, &str) = DEFAULT_HEADER;
 	let body: Value = json!({
         "videoId": vid,
         "context": {
@@ -180,9 +205,16 @@ pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
 			}
         }
     });
-	let method: Method = Method::POST;
-	let url: String = format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY);
-	let resp: Result<Response<Body>, Error> = request(method, &url, header, &body).await;
+	let data: RequestData = RequestData { 
+		method: Method::POST,
+		url: format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY),
+		header: Header {
+			key: String::from("user-agent"),
+			value: String::new()
+		},
+		body
+	};
+	let resp: Result<Response<Body>, Error> = request(data).await;
 	match resp {
 		Err(_) => Err(error),
 		Ok(val) => match to_bytes(val.into_body()).await {
@@ -198,24 +230,7 @@ pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
 	}
 }
 
-// Structs to get video metadata
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct Meta {
-	title: String,
-	duration_ms: u64,
-	audio_channels: u64,
-	audio_sample_rate: u64,
-	average_bitrate: u64,
-	bitrate: u64,
-	content_length: u64,
-	high_replication: bool,
-	itag: u64,
-	loudness_db: f64,
-	mime_type: String,
-	url: String
-}
-
+// Implements
 impl Meta {
 	pub async fn get(url: &str) -> Result<Self, Error> {
 		let vid: &str = match extract_vid(url) {
@@ -259,6 +274,12 @@ impl Meta {
 		Ok(video_meta)
 	}
 }
+
+
+// =======================================================================
+// |                      UNDER DEVELOPMENT                              |
+// =======================================================================
+
 
 // Add downloading here
 pub async fn download(url: &str) -> Result<Meta, Error> {
