@@ -8,6 +8,8 @@ extern crate regex;
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\?v(?:i)?=|\&v(?:i)?=))([^#\&\?]*).*";
 
+
+
 // Imports
 use hyper::{
 	Client, 
@@ -145,6 +147,7 @@ pub trait Grab {
 	fn grab_s(&self, key: &str) -> String;
 	fn grab_n(&self, key: &str) -> u64;
 	fn grab_f(&self, key: &str) -> f64;
+	fn grab_a(&self, key: &str) -> Vec<Value>;
 }
 impl Grab for Value {
 	fn grab_b(&self, key: &str) -> bool {
@@ -166,6 +169,11 @@ impl Grab for Value {
 		let def_val: Value = json!(0.);
 		let v: &Value = self.get(key).unwrap_or(&def_val);
 		v.as_f64().unwrap_or_default()
+	}
+	fn grab_a(&self, key: &str) -> Vec<Value> {
+		let def_val: Value = json!([]);
+		let v: &Value = self.get(key).unwrap_or(&def_val);
+		v.as_array().unwrap().to_owned()
 	}
 }
 
@@ -193,36 +201,36 @@ pub struct VideoMeta {
 	stream: AdaptiveAudioStream
 }
 
-impl AdaptiveAudioStream {
-	pub fn from_sd(streaming_data: &Value) -> Option<Vec<Self>> {
-		let af: &Vec<Value> = match streaming_data.get("adaptiveFormats") {
-			None => return None,
-			Some(val) => match val.as_array() {
-				None => return None,
-				Some(val) => val
-			}
-		};
-		let mut aas_vec: Vec<Self> = vec![];
 
-		for stream in af {
-			let check_val: Option<&Value> = stream.get("audioQuality");
-			if check_val.is_some() {
-				aas_vec.push(Self {
-					duration_ms: stream.grab_s("approxDurationMs").parse().unwrap_or_default(),
-					audio_channels: stream.grab_n("audioChannels"),
-					audio_sample_rate: stream.grab_s("audioSampleRate").parse().unwrap_or_default(),
-					average_bitrate: stream.grab_n("averageBitrate"),
-					bitrate: stream.grab_n("bitrate"),
-					content_length: stream.grab_s("contentLength").parse().unwrap_or_default(),
-					high_replication: stream.grab_b("highReplication"),
-					itag: stream.grab_n("itag"),
-					loudness_db: stream.grab_f("loudnessDb"),
-					mime_type: stream.grab_s("mimeType"),
-					url: stream.grab_s("url")
-				});
+
+impl AdaptiveAudioStream {
+	pub fn from_sd(sd: &Value) -> Self {
+		let adaptive_streams: Vec<Value> = sd.grab_a("adaptiveFormats");
+		let mut best_stream_id: usize = 0;
+		let mut best_bitrate_yet: u64 = 0;
+		for (id, strm) in adaptive_streams.iter().enumerate() {
+			if strm.get("audioQuality").is_some() {
+				let bitrate: u64 = strm.grab_n("bitrate");
+				if bitrate > best_bitrate_yet {
+					best_stream_id = id;
+					best_bitrate_yet = bitrate;
+				}
 			}
 		};
-		Some(aas_vec)
+		let stream: &Value = &adaptive_streams[best_stream_id];
+		Self {
+			duration_ms: stream.grab_s("approxDurationMs").parse().unwrap_or_default(),
+			audio_channels: stream.grab_n("audioChannels"),
+			audio_sample_rate: stream.grab_s("audioSampleRate").parse().unwrap_or_default(),
+			average_bitrate: stream.grab_n("averageBitrate"),
+			bitrate: stream.grab_n("bitrate"),
+			content_length: stream.grab_s("contentLength").parse().unwrap_or_default(),
+			high_replication: stream.grab_b("highReplication"),
+			itag: stream.grab_n("itag"),
+			loudness_db: stream.grab_f("loudnessDb"),
+			mime_type: stream.grab_s("mimeType"),
+			url: stream.grab_s("url")
+		}
 	}
 }
 impl VideoMeta {
@@ -248,24 +256,11 @@ impl VideoMeta {
 			None => return Err(dataerror)
 		};
 
-		let streams: Vec<AdaptiveAudioStream> = match AdaptiveAudioStream::from_sd(streaming_data) {
-			Some(val) => val,
-			None => return Err(dataerror)
-		};
+		let stream: AdaptiveAudioStream = AdaptiveAudioStream::from_sd(streaming_data);
 
-		let mut max_quality_stream_index: usize = 0;
-
-		for i in 1..streams.len() {
-			if streams[i].bitrate > streams[max_quality_stream_index].bitrate {
-				max_quality_stream_index = i;
-			}
-		};
-
-		let best_stream: AdaptiveAudioStream = streams[max_quality_stream_index].clone();
-		
 		let video_meta: Self = Self {
 			title: video_details.grab_s("title"),
-			stream: best_stream
+			stream
 		};
 
 		Ok(video_meta)
