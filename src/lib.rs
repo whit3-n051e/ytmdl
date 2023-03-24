@@ -7,7 +7,8 @@ extern crate regex;
 // VERY important constants
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\?v(?:i)?=|\&v(?:i)?=))([^#\&\?]*).*";
-
+#[allow(dead_code)]
+const ITAG_BEST_LIST: [u16; 7] = [139, 249, 250, 140, 171, 251, 141];
 
 
 // Imports
@@ -35,6 +36,46 @@ use regex::{
 	Captures, 
 	Match
 };
+
+pub enum AudioContainer {
+	M4A,
+	WEBM
+}
+
+pub trait Grab {
+	fn grab_b(&self, key: &str) -> bool;
+	fn grab_s(&self, key: &str) -> String;
+	fn grab_n(&self, key: &str) -> u64;
+	fn grab_f(&self, key: &str) -> f64;
+	fn grab_a(&self, key: &str) -> Vec<Value>;
+}
+impl Grab for Value {
+	fn grab_b(&self, key: &str) -> bool {
+		let def_val: Value = json!(false);
+		let v: &Value = self.get(key).unwrap_or(&def_val);
+		v.as_bool().unwrap_or_default()
+	}
+	fn grab_s(&self, key: &str) -> String {
+		let def_val: Value = json!("");
+		let v: &Value = self.get(key).unwrap_or(&def_val);
+		String::from(v.as_str().unwrap_or_default())
+	}
+	fn grab_n(&self, key: &str) -> u64 {
+		let def_val: Value = json!(0);
+		let v: &Value = self.get(key).unwrap_or(&def_val);
+		v.as_u64().unwrap_or_default()
+	}
+	fn grab_f(&self, key: &str) -> f64 {
+		let def_val: Value = json!(0.);
+		let v: &Value = self.get(key).unwrap_or(&def_val);
+		v.as_f64().unwrap_or_default()
+	}
+	fn grab_a(&self, key: &str) -> Vec<Value> {
+		let def_val: Value = json!([]);
+		let v: &Value = self.get(key).unwrap_or(&def_val);
+		v.as_array().unwrap().to_owned()
+	}
+}
 
 // Debug functions
 pub fn log<T: Debug>(content: T, filename: &str) -> Result<(), Error> {
@@ -140,46 +181,18 @@ pub fn to_vid(url: &str) -> Result<&str, Error> {
 		_ => Err(err)
 	}
 }
-
-// One trait to rule them all
-pub trait Grab {
-	fn grab_b(&self, key: &str) -> bool;
-	fn grab_s(&self, key: &str) -> String;
-	fn grab_n(&self, key: &str) -> u64;
-	fn grab_f(&self, key: &str) -> f64;
-	fn grab_a(&self, key: &str) -> Vec<Value>;
-}
-impl Grab for Value {
-	fn grab_b(&self, key: &str) -> bool {
-		let def_val: Value = json!(false);
-		let v: &Value = self.get(key).unwrap_or(&def_val);
-		v.as_bool().unwrap_or_default()
-	}
-	fn grab_s(&self, key: &str) -> String {
-		let def_val: Value = json!("");
-		let v: &Value = self.get(key).unwrap_or(&def_val);
-		String::from(v.as_str().unwrap_or_default())
-	}
-	fn grab_n(&self, key: &str) -> u64 {
-		let def_val: Value = json!(0);
-		let v: &Value = self.get(key).unwrap_or(&def_val);
-		v.as_u64().unwrap_or_default()
-	}
-	fn grab_f(&self, key: &str) -> f64 {
-		let def_val: Value = json!(0.);
-		let v: &Value = self.get(key).unwrap_or(&def_val);
-		v.as_f64().unwrap_or_default()
-	}
-	fn grab_a(&self, key: &str) -> Vec<Value> {
-		let def_val: Value = json!([]);
-		let v: &Value = self.get(key).unwrap_or(&def_val);
-		v.as_array().unwrap().to_owned()
+pub fn cont_by_itag(itag: u16) -> Result<AudioContainer, Error> {
+	let error: Error = Error::from(ErrorKind::InvalidData);
+	match itag {
+		139 | 140 | 141 => Ok(AudioContainer::M4A),
+		171 | 249 | 250 | 251 => Ok(AudioContainer::WEBM),
+		_ => Err(error)
 	}
 }
 
 // Structs to get video metadata
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AdaptiveAudioStream {
 	duration_ms: u64,
 	audio_channels: u64,
@@ -200,8 +213,6 @@ pub struct VideoMeta {
 	title: String,
 	stream: AdaptiveAudioStream
 }
-
-
 
 impl AdaptiveAudioStream {
 	pub fn from_sd(sd: &Value) -> Self {
