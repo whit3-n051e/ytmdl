@@ -7,9 +7,7 @@ extern crate regex;
 // VERY important constants
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\?v(?:i)?=|\&v(?:i)?=))([^#\&\?]*).*";
-#[allow(dead_code)]
-const ITAG_BEST_LIST: [u16; 7] = [139, 249, 250, 140, 171, 251, 141];
-
+const DEFAULT_HEADER: (&str, &str) = ("user-agent", "");
 
 // Imports
 use hyper::{
@@ -18,7 +16,8 @@ use hyper::{
 	Request,
 	Method,
 	client::HttpConnector,
-	body::to_bytes
+	body::to_bytes,
+	Response
 };
 use hyper_tls::HttpsConnector;
 use std::{
@@ -41,6 +40,7 @@ pub enum AudioContainer {
 	M4A,
 	WEBM
 }
+
 
 pub trait Grab {
 	fn grab_b(&self, key: &str) -> bool;
@@ -94,59 +94,7 @@ pub fn read_line() -> Result<String, Error> {
 	}
 }
 
-// Important functions
-pub async fn send_request(method: Method, url: &str, header: (&str, &str), body: &Value) -> Result<Value, Error> {
-	let err: Error = Error::from(ErrorKind::InvalidData);
-	let https: HttpsConnector<HttpConnector> = HttpsConnector::new();
-	let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
-		.build::<_, Body>(https);
-
-	match serde_json::to_string(body) {	
-		Err(_) => Err(err),
-		Ok(val) => match Request::builder()
-			.method(method)
-			.uri(url)
-			.header(header.0, header.1)
-			.body(Body::from(val)) {
-				Err(_) => Err(err),
-				Ok(val) => match client.request(val).await {
-					Err(_) => Err(err),
-					Ok(val) => match to_bytes(val.into_body()).await {
-						Err(_) => Err(err),
-						Ok(val) => match String::from_utf8(val.to_vec()) {
-							Err(_) => Err(err),
-							Ok(val) => match serde_json::from_str(&val) {
-								Err(_) => Err(err),
-								Ok(val) => Ok(val)
-						}
-					}
-				}
-			}
-		}
-	}
-}
-pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
-	let header: (&str, &str) = ("user-agent", "");
-	let body: Value = json!({
-        "videoId": vid,
-        "context": {
-            "client": {
-                "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-				"clientVersion": "2.0"
-            },
-			"thirdParty": {
-				"embedUrl": "https://www.youtube.com"
-			}
-        }
-    });
-	let method: Method = Method::POST;
-	let url: String = format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY);
-	let resp: Result<Value, Error> = send_request(method, &url, header, &body).await;
-	match resp {
-		Ok(val) => Ok(val),
-		Err(err) => Err(err)
-	}
-}
+// System functions
 pub fn write_file(content: &[u8], name: &str) -> Result<(), Error> {
 	let mut file: File = match File::create(name) {
 		Ok(val) => val,
@@ -161,7 +109,7 @@ pub fn write_file(content: &[u8], name: &str) -> Result<(), Error> {
 		Err(err) => Err(err)
 	}
 }
-pub fn to_vid(url: &str) -> Result<&str, Error> {
+pub fn extract_vid(url: &str) -> Result<&str, Error> {
 	let err: Error = Error::from(ErrorKind::InvalidInput);
 	if url.len() == 11 {
 		return Ok(url);
@@ -181,19 +129,80 @@ pub fn to_vid(url: &str) -> Result<&str, Error> {
 		_ => Err(err)
 	}
 }
-pub fn cont_by_itag(itag: u16) -> Result<AudioContainer, Error> {
+pub fn best_stream(adaptive_streams: &[Value]) -> usize {
+	let mut best_stream_id: usize = 0;
+	let mut best_bitrate_yet: u64 = 0;
+	for (id, strm) in adaptive_streams.iter().enumerate() {
+		if strm.get("audioQuality").is_some() {
+			let bitrate: u64 = strm.grab_n("bitrate");
+			if bitrate > best_bitrate_yet {
+				best_stream_id = id;
+				best_bitrate_yet = bitrate;
+			}
+		}
+	};
+	best_stream_id
+}
+
+// Network functions
+pub async fn request(method: Method, url: &str, header: (&str, &str), body: &Value) -> Result<Response<Body>, Error> {
 	let error: Error = Error::from(ErrorKind::InvalidData);
-	match itag {
-		139 | 140 | 141 => Ok(AudioContainer::M4A),
-		171 | 249 | 250 | 251 => Ok(AudioContainer::WEBM),
-		_ => Err(error)
+	let https: HttpsConnector<HttpConnector> = HttpsConnector::new();
+	let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
+		.build::<_, Body>(https);
+	match serde_json::to_string(body) {
+		Err(_) => Err(error),
+		Ok(val) => match Request::builder()
+			.method(method)
+			.uri(url)
+			.header(header.0, header.1)
+			.body(Body::from(val)) {
+				Err(_) => Err(error),
+				Ok(req) => match client.request(req).await {
+					Err(_) => Err(error),
+					Ok(resp) => Ok(resp)
+				}
+			}
+	}
+}
+pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
+	let error: Error = Error::from(ErrorKind::InvalidData);
+	let header: (&str, &str) = DEFAULT_HEADER;
+	let body: Value = json!({
+        "videoId": vid,
+        "context": {
+            "client": {
+                "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+				"clientVersion": "2.0"
+            },
+			"thirdParty": {
+				"embedUrl": "https://www.youtube.com"
+			}
+        }
+    });
+	let method: Method = Method::POST;
+	let url: String = format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY);
+	let resp: Result<Response<Body>, Error> = request(method, &url, header, &body).await;
+	match resp {
+		Err(_) => Err(error),
+		Ok(val) => match to_bytes(val.into_body()).await {
+			Err(_) => Err(error),
+			Ok(val) => match String::from_utf8(val.to_vec()) {
+				Err(_) => Err(error),
+				Ok(val) => match serde_json::from_str(&val) {
+					Err(_) => Err(error),
+					Ok(val) => Ok(val)
+				}
+			}
+		}
 	}
 }
 
 // Structs to get video metadata
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct AdaptiveAudioStream {
+pub struct Meta {
+	title: String,
 	duration_ms: u64,
 	audio_channels: u64,
 	audio_sample_rate: u64,
@@ -207,46 +216,9 @@ pub struct AdaptiveAudioStream {
 	url: String
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct VideoMeta {
-	title: String,
-	stream: AdaptiveAudioStream
-}
-
-impl AdaptiveAudioStream {
-	pub fn from_sd(sd: &Value) -> Self {
-		let adaptive_streams: Vec<Value> = sd.grab_a("adaptiveFormats");
-		let mut best_stream_id: usize = 0;
-		let mut best_bitrate_yet: u64 = 0;
-		for (id, strm) in adaptive_streams.iter().enumerate() {
-			if strm.get("audioQuality").is_some() {
-				let bitrate: u64 = strm.grab_n("bitrate");
-				if bitrate > best_bitrate_yet {
-					best_stream_id = id;
-					best_bitrate_yet = bitrate;
-				}
-			}
-		};
-		let stream: &Value = &adaptive_streams[best_stream_id];
-		Self {
-			duration_ms: stream.grab_s("approxDurationMs").parse().unwrap_or_default(),
-			audio_channels: stream.grab_n("audioChannels"),
-			audio_sample_rate: stream.grab_s("audioSampleRate").parse().unwrap_or_default(),
-			average_bitrate: stream.grab_n("averageBitrate"),
-			bitrate: stream.grab_n("bitrate"),
-			content_length: stream.grab_s("contentLength").parse().unwrap_or_default(),
-			high_replication: stream.grab_b("highReplication"),
-			itag: stream.grab_n("itag"),
-			loudness_db: stream.grab_f("loudnessDb"),
-			mime_type: stream.grab_s("mimeType"),
-			url: stream.grab_s("url")
-		}
-	}
-}
-impl VideoMeta {
+impl Meta {
 	pub async fn get(url: &str) -> Result<Self, Error> {
-		let vid: &str = match to_vid(url) {
+		let vid: &str = match extract_vid(url) {
 			Ok(val) => val,
 			Err(err) => return Err(err)
 		};
@@ -262,18 +234,39 @@ impl VideoMeta {
 			return Err(dataerror);
 		};
 
-		let streaming_data: &Value = match video_data.get("streamingData") {
-			Some(val) => val,
+		let streams: Vec<Value> = match video_data.get("streamingData") {
+			Some(val) => val.grab_a("adaptiveFormats"),
 			None => return Err(dataerror)
 		};
 
-		let stream: AdaptiveAudioStream = AdaptiveAudioStream::from_sd(streaming_data);
+		let best_id: usize = best_stream(&streams);
 
 		let video_meta: Self = Self {
 			title: video_details.grab_s("title"),
-			stream
+			duration_ms: streams[best_id].grab_s("approxDurationMs").parse().unwrap_or_default(),
+			audio_channels: streams[best_id].grab_n("audioChannels"),
+			audio_sample_rate: streams[best_id].grab_s("audioSampleRate").parse().unwrap_or_default(),
+			average_bitrate: streams[best_id].grab_n("averageBitrate"),
+			bitrate: streams[best_id].grab_n("bitrate"),
+			content_length: streams[best_id].grab_s("contentLength").parse().unwrap_or_default(),
+			high_replication: streams[best_id].grab_b("highReplication"),
+			itag: streams[best_id].grab_n("itag"),
+			loudness_db: streams[best_id].grab_f("loudnessDb"),
+			mime_type: streams[best_id].grab_s("mimeType"),
+			url: streams[best_id].grab_s("url")
 		};
 
 		Ok(video_meta)
 	}
+}
+
+// Add downloading here
+pub async fn download(url: &str) -> Result<Meta, Error> {
+	let meta: Meta = match Meta::get(url).await {
+		Ok(val) => val,
+		Err(err) => return Err(err)
+	};
+	// let dl_url: &str = &meta.stream.url;
+
+	Ok(meta)
 }
