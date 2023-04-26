@@ -11,5 +11,5 @@ use ytmdl::download;
 
 #[tokio::main]
 async fn main() {
-    debug("https://www.youtube.com/watch?v=lI-XxCM2u1A").await;
+    debug("https://www.youtube.com/watch?v=HebZuI7aoTQ").await;
 }
