@@ -10,7 +10,7 @@ const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\
 
 // Imports
 use hyper::{
-	Client, 
+	Client,
 	Body,
 	Request,
 	Method,
@@ -21,7 +21,7 @@ use hyper::{
 use hyper_tls::HttpsConnector;
 use std::{
 	io::{
-		Error, 
+		Error,
 		ErrorKind,
 		Write
 	},
@@ -36,11 +36,6 @@ use regex::{
 };
 
 // Enums, traits, structs
-pub enum AudioContainer {
-	M4A,
-	WEBM
-}
-
 pub trait Grab {
 	fn grab_b(&self, key: &str) -> bool;
 	fn grab_s(&self, key: &str) -> String;
@@ -76,6 +71,7 @@ impl Grab for Value {
 	}
 }
 
+// Structs
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct Meta {
@@ -103,26 +99,64 @@ pub struct RequestData {
 	body: Value
 }
 
-// Debug functions
-pub fn log<T: Debug>(content: T, filename: &str) -> Result<(), Error> {
-	let content_s: String = format!("{:#?}", content);
-	let content_b: &[u8] = content_s.as_bytes();
-	match write_file(content_b, filename) {
-		Ok(_) => Ok(()),
-		Err(err) => Err(err)
+// Implemets
+impl Header {
+	pub fn default_header() -> Self {
+		Self {
+			key: String::from("user-agent"),
+			value: String::new()
+		}
 	}
 }
-pub fn read_line() -> Result<String, Error> {
-	let mut s: String = String::new();
-	match std::io::stdin().read_line(&mut s) {
-		Ok(_) => Ok(s),
-		Err(err) => Err(err)
+impl Meta {
+	pub async fn get(url: &str) -> Result<Self, Error> {
+		let vid: &str = match vid_from_url(url) {
+			Ok(val) => val,
+			Err(err) => return Err(err)
+		};
+		let dataerror: Error = Error::from(ErrorKind::InvalidData);
+		let video_data: Value = get_video_data(vid).await?;
+
+		let video_details: &Value = match video_data.get("videoDetails") {
+			Some(val) => val,
+			None => return Err(dataerror)
+		};
+
+		if video_details.grab_b("isLiveContent") || video_details.grab_b("isPrivate") {
+			return Err(dataerror);
+		};
+
+		let streams: Vec<Value> = match video_data.get("streamingData") {
+			Some(val) => val.grab_a("adaptiveFormats"),
+			None => return Err(dataerror)
+		};
+
+		let best_id: usize = best_stream(&streams);
+
+		let video_meta: Self = Self {
+			title: video_details.grab_s("title"),
+			duration_ms: streams[best_id].grab_s("approxDurationMs").parse().unwrap_or_default(),
+			audio_channels: streams[best_id].grab_n("audioChannels"),
+			audio_sample_rate: streams[best_id].grab_s("audioSampleRate").parse().unwrap_or_default(),
+			average_bitrate: streams[best_id].grab_n("averageBitrate"),
+			bitrate: streams[best_id].grab_n("bitrate"),
+			content_length: streams[best_id].grab_s("contentLength").parse().unwrap_or_default(),
+			high_replication: streams[best_id].grab_b("highReplication"),
+			itag: streams[best_id].grab_n("itag"),
+			loudness_db: streams[best_id].grab_f("loudnessDb"),
+			mime_type: streams[best_id].grab_s("mimeType"),
+			url: streams[best_id].grab_s("url")
+		};
+
+		Ok(video_meta)
 	}
 }
 
-// System functions
-pub fn write_file(content: &[u8], name: &str) -> Result<(), Error> {
-	let mut file: File = match File::create(name) {
+// Debug functions
+pub fn log<T: Debug>(content: T, filename: &str) -> Result<(), Error> {
+	let str: String = format!("{:#?}", content);
+	let content: &[u8] = str.as_bytes();
+	let mut file: File = match File::create(filename) {
 		Ok(val) => val,
 		Err(err) => return Err(err)
 	};
@@ -135,7 +169,16 @@ pub fn write_file(content: &[u8], name: &str) -> Result<(), Error> {
 		Err(err) => Err(err)
 	}
 }
-pub fn extract_vid(url: &str) -> Result<&str, Error> {
+pub fn read_line() -> Result<String, Error> {
+	let mut s: String = String::new();
+	match std::io::stdin().read_line(&mut s) {
+		Ok(_) => Ok(s),
+		Err(err) => Err(err)
+	}
+}
+
+// Calc functions
+pub fn vid_from_url(url: &str) -> Result<&str, Error> {
 	let err: Error = Error::from(ErrorKind::InvalidInput);
 	if url.len() == 11 {
 		return Ok(url);
@@ -208,10 +251,7 @@ pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
 	let data: RequestData = RequestData { 
 		method: Method::POST,
 		url: format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY),
-		header: Header {
-			key: String::from("user-agent"),
-			value: String::new()
-		},
+		header: Header::default_header(),
 		body
 	};
 	let resp: Result<Response<Body>, Error> = request(data).await;
@@ -231,49 +271,6 @@ pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
 }
 
 // Implements
-impl Meta {
-	pub async fn get(url: &str) -> Result<Self, Error> {
-		let vid: &str = match extract_vid(url) {
-			Ok(val) => val,
-			Err(err) => return Err(err)
-		};
-		let dataerror: Error = Error::from(ErrorKind::InvalidData);
-		let video_data: Value = get_video_data(vid).await?;
-
-		let video_details: &Value = match video_data.get("videoDetails") {
-			Some(val) => val,
-			None => return Err(dataerror)
-		};
-
-		if video_details.grab_b("isLiveContent") || video_details.grab_b("isPrivate") {
-			return Err(dataerror);
-		};
-
-		let streams: Vec<Value> = match video_data.get("streamingData") {
-			Some(val) => val.grab_a("adaptiveFormats"),
-			None => return Err(dataerror)
-		};
-
-		let best_id: usize = best_stream(&streams);
-
-		let video_meta: Self = Self {
-			title: video_details.grab_s("title"),
-			duration_ms: streams[best_id].grab_s("approxDurationMs").parse().unwrap_or_default(),
-			audio_channels: streams[best_id].grab_n("audioChannels"),
-			audio_sample_rate: streams[best_id].grab_s("audioSampleRate").parse().unwrap_or_default(),
-			average_bitrate: streams[best_id].grab_n("averageBitrate"),
-			bitrate: streams[best_id].grab_n("bitrate"),
-			content_length: streams[best_id].grab_s("contentLength").parse().unwrap_or_default(),
-			high_replication: streams[best_id].grab_b("highReplication"),
-			itag: streams[best_id].grab_n("itag"),
-			loudness_db: streams[best_id].grab_f("loudnessDb"),
-			mime_type: streams[best_id].grab_s("mimeType"),
-			url: streams[best_id].grab_s("url")
-		};
-
-		Ok(video_meta)
-	}
-}
 
 
 // =======================================================================
@@ -282,12 +279,11 @@ impl Meta {
 
 
 // Add downloading here
-pub async fn download(url: &str) -> Result<Meta, Error> {
-	let meta: Meta = match Meta::get(url).await {
+pub async fn download(input: &str) -> Result<Meta, Error> {
+	let meta: Meta = match Meta::get(input).await {
 		Ok(val) => val,
 		Err(err) => return Err(err)
 	};
-	// let dl_url: &str = &meta.stream.url;
 
 	Ok(meta)
 }

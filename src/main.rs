@@ -9,6 +9,6 @@ extern crate tokio;
 
 #[tokio::main]
 async fn main() {
-    let meta = ytmdl::Meta::get("https://www.youtube.com/watch?v=DK6IRG4CAbw").await.unwrap();
-    ytmdl::log(meta, "log_0.txt").unwrap();
+    let meta: ytmdl::Meta = ytmdl::download("BTYAsjAVa3I").await.unwrap();
+    ytmdl::log(meta, "log_4.txt").unwrap();
 }
