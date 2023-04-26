@@ -71,14 +71,6 @@ pub struct RequestData {
 }
 
 // Implemets
-impl Header {
-	pub fn default_header() -> Self {
-		Self {
-			key: String::from("user-agent"),
-			value: String::new()
-		}
-	}
-}
 impl Meta {
 	pub async fn get(url: &str) -> Result<Self, Error> {
 		let (title, streams) = get_raw_meta(url).await?;
@@ -135,6 +127,14 @@ impl Grab for Value {
 		let default: Value = json!([]);
 		let v: &Value = self.get(index).unwrap_or(&default);
 		v.as_array().unwrap().to_owned()
+	}
+}
+impl Default for Header {
+	fn default() -> Self {
+		Self {
+			key: String::from("user-agent"),
+			value: String::new()
+		}
 	}
 }
 
@@ -230,20 +230,19 @@ pub fn best_stream(adaptive_streams: &[Value]) -> Result<usize, Error> {
 
 // Network functions
 pub async fn request(data: RequestData) -> Result<Response<Body>, Error> {
-	let error: Error = Error::from(ErrorKind::InvalidData);
 	let https: HttpsConnector<HttpConnector> = HttpsConnector::new();
 	let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
 		.build::<_, Body>(https);
 	match serde_json::to_string(&data.body) {
-		Err(_) => Err(error),
+		Err(_) => Err(Error::from(ErrorKind::Other)),
 		Ok(val) => match Request::builder()
 			.method(data.method)
 			.uri(data.url)
 			.header(data.header.key, data.header.value)
 			.body(Body::from(val)) {
-				Err(_) => Err(error),
+				Err(_) => Err(Error::from(ErrorKind::Other)),
 				Ok(req) => match client.request(req).await {
-					Err(_) => Err(error),
+					Err(_) => Err(Error::from(ErrorKind::Other)),
 					Ok(resp) => Ok(resp)
 				}
 			}
@@ -251,7 +250,9 @@ pub async fn request(data: RequestData) -> Result<Response<Body>, Error> {
 }
 pub async fn get_raw_meta(url: &str) -> Result<(String, Vec<Value>), Error> {
 	let vid: &str = vid_from_url(url)?;
-	let error: Error = Error::from(ErrorKind::InvalidData);
+	let method: Method = Method::POST;
+	let url: String = format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY);
+	let header: Header = Header::default();
 	let body: Value = json!({
         "videoId": vid,
         "context": {
@@ -264,21 +265,16 @@ pub async fn get_raw_meta(url: &str) -> Result<(String, Vec<Value>), Error> {
 			}
         }
     });
-	let data: RequestData = RequestData {
-		method: Method::POST,
-		url: format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY),
-		header: Header::default_header(),
-		body
-	};
-	let resp: Result<Response<Body>, Error> = request(data).await;
+	let req_data: RequestData = RequestData{ method, url, header, body };
+	let resp: Result<Response<Body>, Error> = request(req_data).await;
 	let vdata: Value = match resp {
-		Err(_) => return Err(error),
+		Err(_) => return Err(Error::from(ErrorKind::Other)),
 		Ok(val) => match to_bytes(val.into_body()).await {
-			Err(_) => return Err(error),
+			Err(_) => return Err(Error::from(ErrorKind::Other)),
 			Ok(val) => match String::from_utf8(val.to_vec()) {
-				Err(_) => return Err(error),
+				Err(_) => return Err(Error::from(ErrorKind::Other)),
 				Ok(val) => match serde_json::from_str::<Value>(&val) {
-					Err(_) => return Err(error),
+					Err(_) => return Err(Error::from(ErrorKind::Other)),
 					Ok(val) => val
 				}
 			}
