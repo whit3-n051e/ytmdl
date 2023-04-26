@@ -9,5 +9,5 @@ use ytmdl::debug;
 
 #[tokio::main]
 async fn main() {
-    debug("https://www.youtube.com/watch?v=DK6IRG4CAbw").await;
+    debug("BTYAsjAVa3I").await;
 }

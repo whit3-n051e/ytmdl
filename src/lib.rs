@@ -42,7 +42,6 @@ use tempfile::{
 	TempDir
 };
 
-
 // Structs
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -82,28 +81,11 @@ impl Header {
 }
 impl Meta {
 	pub async fn get(url: &str) -> Result<Self, Error> {
-		let vid: &str = vid_from_url(url)?;
-		let dataerror: Error = Error::from(ErrorKind::InvalidData);
-		let vdata: Value = get_video_data(vid).await?;
-
-		let video_details: &Value = match vdata.get("videoDetails") {
-			Some(val) => val,
-			None => return Err(dataerror)
-		};
-
-		if video_details.grab_b("isLiveContent") || video_details.grab_b("isPrivate") {
-			return Err(dataerror);
-		};
-
-		let streams: Vec<Value> = match vdata.get("streamingData") {
-			Some(val) => val.grab_a("adaptiveFormats"),
-			None => return Err(dataerror)
-		};
-
+		let (title, streams) = get_raw_meta(url).await?;
 		let best_id: usize = best_stream(&streams)?;
 
 		let meta: Self = Self {
-			title: video_details.grab_s("title"),
+			title,
 			duration_ms: streams[best_id].grab_s("approxDurationMs").parse().unwrap_or_default(),
 			audio_channels: streams[best_id].grab_n("audioChannels"),
 			audio_sample_rate: streams[best_id].grab_s("audioSampleRate").parse().unwrap_or_default(),
@@ -175,7 +157,7 @@ pub fn log<T: Debug>(content: T, filename: &str) {
 		}
 	}
 	match file.sync_all() {
-		Ok(_) => println!("LOG: Success."),
+		Ok(_) => println!("LOG: Success: {filename}"),
 		Err(_) => println!("LOG: Could not sync.")
 	};
 }
@@ -191,16 +173,18 @@ pub async fn debug(input: &str) {
 		Ok(val) => val,
 		Err(_) => {println!("Incorrect input."); return}
 	};
-	let meta: Meta = match Meta::get(vid).await {
-		Ok(val) => val,
-		Err(_) => {println!("Returned error."); return}
-	};
-	let vdata: Value = match get_video_data(vid).await {
+	let vdata: (String, Vec<Value>) = match get_raw_meta(vid).await {
 		Ok(val) => val,
 		Err(_) => {println!("Could not get video data."); return}
 	};
-	log(meta, "meta.txt");
 	log(vdata, "vdata.txt");
+	/*
+	let meta: Meta = match Meta::get(vid).await {
+		Ok(val) => val,
+		Err(_) => {println!("Could not get meta"); return}
+	};
+	log(meta, "meta.txt");
+	*/
 }
 
 // Calc functions
@@ -225,7 +209,6 @@ pub fn vid_from_url(url: &str) -> Result<&str, Error> {
 	}
 }
 pub fn best_stream(adaptive_streams: &[Value]) -> Result<usize, Error> {
-	log(adaptive_streams, "as.txt");
 	let mut best_stream_id: usize = 0;
 	let mut best_bitrate_yet: u64 = 0;
 	for (id, strm) in adaptive_streams.iter().enumerate() {
@@ -266,7 +249,8 @@ pub async fn request(data: RequestData) -> Result<Response<Body>, Error> {
 			}
 	}
 }
-pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
+pub async fn get_raw_meta(url: &str) -> Result<(String, Vec<Value>), Error> {
+	let vid: &str = vid_from_url(url)?;
 	let error: Error = Error::from(ErrorKind::InvalidData);
 	let body: Value = json!({
         "videoId": vid,
@@ -280,25 +264,36 @@ pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
 			}
         }
     });
-	let data: RequestData = RequestData { 
+	let data: RequestData = RequestData {
 		method: Method::POST,
 		url: format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY),
 		header: Header::default_header(),
 		body
 	};
 	let resp: Result<Response<Body>, Error> = request(data).await;
-	match resp {
-		Err(_) => Err(error),
+	let vdata: Value = match resp {
+		Err(_) => return Err(error),
 		Ok(val) => match to_bytes(val.into_body()).await {
-			Err(_) => Err(error),
+			Err(_) => return Err(error),
 			Ok(val) => match String::from_utf8(val.to_vec()) {
-				Err(_) => Err(error),
-				Ok(val) => match serde_json::from_str(&val) {
-					Err(_) => Err(error),
-					Ok(val) => Ok(val)
+				Err(_) => return Err(error),
+				Ok(val) => match serde_json::from_str::<Value>(&val) {
+					Err(_) => return Err(error),
+					Ok(val) => val
 				}
 			}
 		}
+	};
+	let video_details: &Value = match vdata.get("videoDetails") {
+		Some(val) => val,
+		None => return Err(Error::from(ErrorKind::Other))
+	};
+	if video_details.grab_b("isLiveContent") || video_details.grab_b("isPrivate") {
+		return Err(Error::from(ErrorKind::Other));
+	};
+	match vdata.get("streamingData") {
+		Some(val) => Ok((video_details.grab_s("title"), val.grab_a("adaptiveFormats"))),
+		None => Err(Error::from(ErrorKind::Other))
 	}
 }
 pub async fn download(input: &str) -> Result<Meta, Error> {
