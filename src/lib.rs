@@ -3,6 +3,8 @@ extern crate hyper_tls;
 extern crate tokio;
 extern crate serde_json;
 extern crate regex;
+extern crate reqwest;
+extern crate tempfile;
 
 // Constants
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
@@ -23,7 +25,8 @@ use std::{
 	io::{
 		Error,
 		ErrorKind,
-		Write
+		Write,
+		copy
 	},
 		fmt::Debug,
 		fs::File
@@ -31,45 +34,14 @@ use std::{
 use serde_json::{Value, json};
 use regex::{
 	Regex,
-	Captures, 
+	Captures,
 	Match
 };
+use tempfile::{
+	Builder,
+	TempDir
+};
 
-// Enums, traits, structs
-pub trait Grab {
-	fn grab_b(&self, key: &str) -> bool;
-	fn grab_s(&self, key: &str) -> String;
-	fn grab_n(&self, key: &str) -> u64;
-	fn grab_f(&self, key: &str) -> f64;
-	fn grab_a(&self, key: &str) -> Vec<Value>;
-}
-impl Grab for Value {
-	fn grab_b(&self, index: &str) -> bool {
-		let default: Value = json!(false);
-		let v: &Value = self.get(index).unwrap_or(&default);
-		v.as_bool().unwrap_or_default()
-	}
-	fn grab_s(&self, index: &str) -> String {
-		let default: Value = json!("");
-		let v: &Value = self.get(index).unwrap_or(&default);
-		String::from(v.as_str().unwrap_or_default())
-	}
-	fn grab_n(&self, index: &str) -> u64 {
-		let default: Value = json!(0);
-		let v: &Value = self.get(index).unwrap_or(&default);
-		v.as_u64().unwrap_or_default()
-	}
-	fn grab_f(&self, index: &str) -> f64 {
-		let default: Value = json!(0.);
-		let v: &Value = self.get(index).unwrap_or(&default);
-		v.as_f64().unwrap_or_default()
-	}
-	fn grab_a(&self, index: &str) -> Vec<Value> {
-		let default: Value = json!([]);
-		let v: &Value = self.get(index).unwrap_or(&default);
-		v.as_array().unwrap().to_owned()
-	}
-}
 
 // Structs
 #[allow(dead_code)]
@@ -110,14 +82,11 @@ impl Header {
 }
 impl Meta {
 	pub async fn get(url: &str) -> Result<Self, Error> {
-		let vid: &str = match vid_from_url(url) {
-			Ok(val) => val,
-			Err(err) => return Err(err)
-		};
+		let vid: &str = vid_from_url(url)?;
 		let dataerror: Error = Error::from(ErrorKind::InvalidData);
-		let video_data: Value = get_video_data(vid).await?;
+		let vdata: Value = get_video_data(vid).await?;
 
-		let video_details: &Value = match video_data.get("videoDetails") {
+		let video_details: &Value = match vdata.get("videoDetails") {
 			Some(val) => val,
 			None => return Err(dataerror)
 		};
@@ -126,14 +95,14 @@ impl Meta {
 			return Err(dataerror);
 		};
 
-		let streams: Vec<Value> = match video_data.get("streamingData") {
+		let streams: Vec<Value> = match vdata.get("streamingData") {
 			Some(val) => val.grab_a("adaptiveFormats"),
 			None => return Err(dataerror)
 		};
 
-		let best_id: usize = best_stream(&streams);
+		let best_id: usize = best_stream(&streams)?;
 
-		let video_meta: Self = Self {
+		let meta: Self = Self {
 			title: video_details.grab_s("title"),
 			duration_ms: streams[best_id].grab_s("approxDurationMs").parse().unwrap_or_default(),
 			audio_channels: streams[best_id].grab_n("audioChannels"),
@@ -148,26 +117,67 @@ impl Meta {
 			url: streams[best_id].grab_s("url")
 		};
 
-		Ok(video_meta)
+		Ok(meta)
+	}
+}
+
+pub trait Grab {
+	fn grab_b(&self, key: &str) -> bool;
+	fn grab_s(&self, key: &str) -> String;
+	fn grab_n(&self, key: &str) -> u64;
+	fn grab_f(&self, key: &str) -> f64;
+	fn grab_a(&self, key: &str) -> Vec<Value>;
+}
+impl Grab for Value {
+	fn grab_b(&self, index: &str) -> bool {
+		let default: Value = json!(false);
+		let v: &Value = self.get(index).unwrap_or(&default);
+		v.as_bool().unwrap_or_default()
+	}
+	fn grab_s(&self, index: &str) -> String {
+		let default: Value = json!("");
+		let v: &Value = self.get(index).unwrap_or(&default);
+		String::from(v.as_str().unwrap_or_default())
+	}
+	fn grab_n(&self, index: &str) -> u64 {
+		let default: Value = json!(0);
+		let v: &Value = self.get(index).unwrap_or(&default);
+		v.as_u64().unwrap_or_default()
+	}
+	fn grab_f(&self, index: &str) -> f64 {
+		let default: Value = json!(0.);
+		let v: &Value = self.get(index).unwrap_or(&default);
+		v.as_f64().unwrap_or_default()
+	}
+	fn grab_a(&self, index: &str) -> Vec<Value> {
+		let default: Value = json!([]);
+		let v: &Value = self.get(index).unwrap_or(&default);
+		v.as_array().unwrap().to_owned()
 	}
 }
 
 // Debug functions
-pub fn log<T: Debug>(content: T, filename: &str) -> Result<(), Error> {
+pub fn log<T: Debug>(content: T, filename: &str) {
 	let str: String = format!("{:#?}", content);
 	let content: &[u8] = str.as_bytes();
 	let mut file: File = match File::create(filename) {
 		Ok(val) => val,
-		Err(err) => return Err(err)
+		Err(_) => {
+			println!("LOG: Could not create file.");
+			return
+		}
 	};
 	match file.write_all(content) {
 		Ok(_) => {},
-		Err(err) => return Err(err)
+		Err(_) => {
+			println!("LOG: Could not write to file.");
+			return
+		}
 	}
 	match file.sync_all() {
-		Ok(_) => Ok(()),
-		Err(err) => Err(err)
-	}
+		Ok(_) => println!("LOG: Success."),
+		Err(_) => println!("LOG: Could not sync.")
+	};
 }
 pub fn read_line() -> Result<String, Error> {
 	let mut s: String = String::new();
@@ -175,6 +185,22 @@ pub fn read_line() -> Result<String, Error> {
 		Ok(_) => Ok(s),
 		Err(err) => Err(err)
 	}
+}
+pub async fn debug(input: &str) {
+	let vid: &str = match vid_from_url(input) {
+		Ok(val) => val,
+		Err(_) => {println!("Incorrect input."); return}
+	};
+	let meta: Meta = match Meta::get(vid).await {
+		Ok(val) => val,
+		Err(_) => {println!("Returned error."); return}
+	};
+	let vdata: Value = match get_video_data(vid).await {
+		Ok(val) => val,
+		Err(_) => {println!("Could not get video data."); return}
+	};
+	log(meta, "meta.txt");
+	log(vdata, "vdata.txt");
 }
 
 // Calc functions
@@ -198,19 +224,25 @@ pub fn vid_from_url(url: &str) -> Result<&str, Error> {
 		_ => Err(err)
 	}
 }
-pub fn best_stream(adaptive_streams: &[Value]) -> usize {
+pub fn best_stream(adaptive_streams: &[Value]) -> Result<usize, Error> {
+	log(adaptive_streams, "as.txt");
 	let mut best_stream_id: usize = 0;
 	let mut best_bitrate_yet: u64 = 0;
 	for (id, strm) in adaptive_streams.iter().enumerate() {
 		if strm.get("audioQuality").is_some() {
 			let bitrate: u64 = strm.grab_n("bitrate");
-			if bitrate > best_bitrate_yet {
+			let url: String = strm.grab_s("url");
+			let audio_channels = strm.grab_n("audioChannels");
+			if (bitrate > best_bitrate_yet) && (url != String::new()) && (audio_channels != 0) {
 				best_stream_id = id;
 				best_bitrate_yet = bitrate;
 			}
 		}
 	};
-	best_stream_id
+	match adaptive_streams[best_stream_id].grab_s("url").is_empty() {
+		false => Ok(best_stream_id),
+		true => Err(Error::from(ErrorKind::Other))
+	}
 }
 
 // Network functions
@@ -269,21 +301,28 @@ pub async fn get_video_data(vid: &str) -> Result<Value, Error> {
 		}
 	}
 }
-
-// Implements
-
-
-// =======================================================================
-// |                      UNDER DEVELOPMENT                              |
-// =======================================================================
-
-
-// Add downloading here
 pub async fn download(input: &str) -> Result<Meta, Error> {
-	let meta: Meta = match Meta::get(input).await {
+	let meta: Meta = Meta::get(input).await?;
+	let tmp_dir: TempDir = Builder::new().prefix("example").tempdir()?;
+	let response: reqwest::Response = match reqwest::get(&meta.url).await {
 		Ok(val) => val,
-		Err(err) => return Err(err)
+		Err(_) => return Err(Error::from(ErrorKind::Other))
 	};
 
+	let mut dest: File = {
+		let fname: &str = response
+			.url()
+			.path_segments()
+			.and_then(|segments: std::str::Split<char>| segments.last())
+			.and_then(|name: &str| if name.is_empty() { None } else { Some(name) })
+			.unwrap_or("tmp.bin");
+		let fname: std::path::PathBuf = tmp_dir.path().join(fname);
+		File::create(fname)?
+	};
+	let content = match response.text().await {
+		Ok(val) => val,
+		Err(_) => return Err(Error::from(ErrorKind::Other))
+	};
+	copy(&mut content.as_bytes(), &mut dest)?;
 	Ok(meta)
 }

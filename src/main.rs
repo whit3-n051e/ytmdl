@@ -1,14 +1,13 @@
-
-#[allow(unused_imports)]
-use serde_json::{Value, json};
-
 extern crate ytmdl;
 extern crate tokio;
 
+#[allow(unused_imports)]
+use ytmdl::debug;
+
 // Sample vid: "BTYAsjAVa3I"
+// https://www.youtube.com/watch?v=DK6IRG4CAbw
 
 #[tokio::main]
 async fn main() {
-    let meta: ytmdl::Meta = ytmdl::download("BTYAsjAVa3I").await.unwrap();
-    ytmdl::log(meta, "log_4.txt").unwrap();
+    debug("https://www.youtube.com/watch?v=DK6IRG4CAbw").await;
 }
