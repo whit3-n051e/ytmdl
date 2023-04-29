@@ -6,15 +6,14 @@ extern crate hyper;
 use serde_json::json;
 #[allow(unused_imports)]
 use ytmdl::{
-    get_vdata,
-    download,
+    test,
     get_meta
 };
 
-// Sample vid: "BTYAsjAVa3I"
-// https://www.youtube.com/watch?v=DK6IRG4CAbw
+
+// https://www.youtube.com/watch?v=ZBh_mQl-2SQ
 
 #[tokio::main]
 async fn main() {
-    
+    test("https://www.youtube.com/watch?v=ZBh_mQl-2SQ").await.expect("msg");
 }
