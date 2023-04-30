@@ -5,9 +5,9 @@ extern crate serde_json;
 extern crate regex;
 extern crate tempfile;
 
-use hyper::{ Client, Body, Request, Method, client::HttpConnector, body::Bytes, Response };
+use hyper::{ Client, Body, Request, Method };
 use hyper_tls::HttpsConnector;
-use std::{ io::{ Write, copy }, fmt::Debug, fs::File, convert::From, path::PathBuf, env };
+use std::{ io::{ Write, copy }, fmt::Debug, fs::File, convert::From, path::PathBuf };
 use serde_json::{ Value, json};
 use regex::{ Regex, Captures, Match };
 use tempfile::{ Builder, TempDir };
@@ -16,22 +16,6 @@ use tempfile::{ Builder, TempDir };
 // Constants
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\?v(?:i)?=|\&v(?:i)?=))([^#\&\?]*).*";
-const ERRORS: [&str; 14] = [
-	/*  0 */ "Incorrect video URL/ID.",
-	/*  1 */ "Could not convert response to JSON",
-	/*  2 */ "Could not get any metadata for this video.",
-	/*  3 */ "This video is a livestream; I am not downloading that.",
-	/*  4 */ "This video is private.",
-	/*  5 */ "Could not get any streams from this video.",
-	/*  6 */ "Could not get response from the metadata server, probably due to a connection error.",
-	/*  7 */ "Could not create temporary directory to download the video.",
-	/*  8 */ "Could not get response from the stream's URL, probably due to a connection error.",
-	/*  9 */ "Could not create file.",
-	/* 10 */ "Could not convert response to text.",
-	/* 11 */ "Could not copy data.",
-	/* 12 */ "Could not find the best stream.",
-	/* 13 */ "Could not find neither the normal download URL for the video, nor the signed one. I'm sorry."
-];
 
 // Errors
 #[derive(Debug)]
@@ -74,38 +58,21 @@ impl From<hyper::http::Error> for Error {
 }
 
 pub trait Erroneous<T> {
-	fn e(self, n: usize) -> Result<T, Error>;
-}
-impl<T, E> Erroneous<T> for Result<T, E> {
-	fn e(self, n: usize) -> Result<T, Error> {
-		match self {
-			Ok(val) => Ok(val),
-			Err(_) => {
-				println!("ERROR {}: {}", n, ERRORS[n]);
-				Err(Error::default())
-			}
-		}
-	}
+	fn e(self) -> Result<T, Error>;
 }
 impl<T> Erroneous<T> for Option<T> {
-	fn e(self, n: usize) -> Result<T, Error> {
+	fn e(self) -> Result<T, Error> {
 		match self {
 			Some(val) => Ok(val),
-			None => {
-				println!("ERROR {}: {}", n, ERRORS[n]);
-				Err(Error::default())
-			}
+			None => Err(Error::default())
 		}
 	}
 }
 impl Erroneous<()> for bool {
-	fn e(self, n: usize) -> Result<(), Error> {
+	fn e(self) -> Result<(), Error> {
 		match self {
 			false => Ok(()),
-			true => {
-				println!("ERROR {}: {}", n, ERRORS[n]);
-				Err(Error::default())
-			}
+			true => Err(Error::default())
 		}
 	}
 }
@@ -162,7 +129,6 @@ pub struct Meta {
 	bitrate: u64,
 	content_length: u64,
 	high_replication: bool,
-	itag: u64,
 	loudness_db: f64,
 	mime_type: String,
 	url: String
@@ -172,7 +138,6 @@ pub struct RawMeta {
 	title: String,
 	streams: Vec<Value>
 }
-
 impl Meta {
 	pub async fn receive(input: &str) -> Result<Self, Error> {
 		let raw_meta: RawMeta = RawMeta::receive(input).await?;
@@ -192,7 +157,6 @@ impl Meta {
 				bitrate: raw_meta.streams[best_id].grab("bitrate"),
 				content_length: (&raw_meta.streams[best_id] as &dyn Grab<String>).grab("contentLength").parse().unwrap_or_default(),
 				high_replication: raw_meta.streams[best_id].grab("highReplication"),
-				itag: raw_meta.streams[best_id].grab("itag"),
 				loudness_db: raw_meta.streams[best_id].grab("loudnessDb"),
 				mime_type: raw_meta.streams[best_id].grab("mimeType"),
 				url
@@ -202,39 +166,46 @@ impl Meta {
 }
 impl RawMeta {
 	pub async fn receive(input: &str) -> Result<Self, Error> {
-		let vid: &str = extract_vid(input).e(0)?;  // Error 0
-		let url: String = format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY);
-		let body: Value = json!({
-			"videoId": vid,
-			"context": {
-				"client": {
-					"clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-					"clientVersion": "2.0"
-				},
-				"thirdParty": {
-					"embedUrl": "https://www.youtube.com"
-				}
-			}
-		});
-		let body: Body = Body::from(serde_json::to_string(&body)?);
+		let vdata: Value = serde_json::from_slice(
+			&hyper::body::to_bytes(
+				Client::builder()
+					.build::<_, Body>(HttpsConnector::new())
+					.request(
+					Request::builder()
+							.method(Method::POST)
+							.uri(format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY))
+							.header("user-agent", "")
+							.body(
+								Body::from(
+									serde_json::to_string(
+										&json!(
+											{
+												"videoId": extract_vid(input)?,
+												"context": {
+													"client": {
+														"clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+														"clientVersion": "2.0"
+													},
+													"thirdParty": {
+														"embedUrl": "https://www.youtube.com"
+													}
+												}
+											}
+										)
+									)?
+								)
+							)?
+					).await?
+					.into_body()
+			).await?
+		)?;
 
-		let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
-			.build::<_, Body>(HttpsConnector::new());
+		let video_details: &Value = vdata.get("videoDetails").e()?;
 
-		let req: Request<Body> = Request::builder()
-			.method(Method::POST)
-			.uri(url)
-			.header("User-Agent", "")
-			.body(body)?;
-		let res: Response<Body> = client.request(req).await.e(6)?;
+		(video_details as &dyn Grab<bool>).grab("isLiveContent").e()?;
+		(video_details as &dyn Grab<bool>).grab("isPrivate").e()?;
 
-		let content: Bytes = hyper::body::to_bytes(res.into_body()).await?;
-		let vdata: Value = serde_json::from_slice(&content)?;
-
-		let video_details: &Value = vdata.get("videoDetails").e(2)?;  // Error 2
-		(video_details as &dyn Grab<bool>).grab("isLiveContent").e(3)?;  // Error 3
-		(video_details as &dyn Grab<bool>).grab("isPrivate").e(4)?;  // Error 4
-		let streaming_data = vdata.get("streamingData").e(5)?;  // Error 5
+		let streaming_data: &Value = vdata.get("streamingData").e()?;
 		Ok(
 			Self {
 				title: video_details.grab("title"),
@@ -277,33 +248,25 @@ pub async fn get_meta(input: &str) {
 
 // Calc functions
 pub fn extract_vid(url: &str) -> Result<&str, Error> {
-	let err: Error = Error::default();
 	if url.len() == 11 {
 		return Ok(url);
 	}
 	let vid_regex: Regex = Regex::new(VID_REGEX).unwrap();
-	let vid_cap: Captures = match vid_regex.captures(url) {
-		None => return Err(err),
-		Some(val) => val
-	};
-	let vid_match: Match = match vid_cap.get(1) {
-		None => return Err(err),
-		Some(val) => val
-	};
+	let vid_cap: Captures = vid_regex.captures(url).e()?;
+	let vid_match: Match = vid_cap.get(1).e()?;
 	let vid: &str = vid_match.as_str();
 	match vid.len() {
 		11 => Ok(vid),
-		_ => Err(err)
+		_ => Err(Error::default())
 	}
 }
 pub fn best_stream_id(streams: &[Value]) -> usize {
 	let mut best_id: usize = 0;
 	let mut best_bitrate_yet: u64 = 0;
 	for (id, strm) in streams.iter().enumerate() {
-		if strm.get("audioQuality").is_some() {
+		if strm.get("audioQuality").is_some() && (strm as &dyn Grab<u64>).grab("audioChannels") >= 2 {
 			let bitrate: u64 = strm.grab("bitrate");
-			let audio_channels: u64 = strm.grab("audioChannels");
-			if (bitrate > best_bitrate_yet) && (audio_channels != 0) {
+			if bitrate > best_bitrate_yet {
 				best_id = id;
 				best_bitrate_yet = bitrate;
 			}
@@ -312,8 +275,8 @@ pub fn best_stream_id(streams: &[Value]) -> usize {
 	best_id
 }
 pub fn decipher(cipher: String) -> Result<String, Error> {
-	(cipher == String::new()).e(13)?;
-	Err(Error::default())
+	(cipher == String::new()).e()?;
+	todo!();
 }
 pub fn temp_dir() -> Result<PathBuf, Error> {
 	let tmp_dir: TempDir = Builder::new().prefix("ytmdl").tempdir()?;
@@ -321,18 +284,22 @@ pub fn temp_dir() -> Result<PathBuf, Error> {
 }
 
 pub async fn download_file(url: &str, dest: PathBuf) -> Result<(), Error> {
-	let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
-			.build::<_, Body>(HttpsConnector::new());
-	let req: Request<Body> = Request::builder()
-		.method(Method::GET)
-		.uri(url)
-		.header("User-Agent", "")
-		.body(Body::empty())?;
-	let res: Response<Body> = client.request(req).await?;
-	let content: Vec<u8> = hyper::body::to_bytes(res.into_body()).await?.to_vec();
-	let mut slice: &[u8] = content.as_slice();
-	let mut file: File = File::create(dest)?;
-	copy(&mut slice, &mut file)?;
+	let content: Vec<u8> = hyper::body::to_bytes(
+		Client::builder()
+			.build::<_, Body>(HttpsConnector::new())
+				.request(
+					Request::builder()
+						.method(Method::GET)
+						.uri(url)
+						.header("User-Agent", "")
+						.body(Body::empty())?
+				)
+					.await?
+					.into_body()
+	)
+		.await?
+		.to_vec();
+	copy(&mut content.as_slice(), &mut File::create(dest)?)?;
 	Ok(())
 }
 
@@ -340,10 +307,10 @@ pub async fn download_file(url: &str, dest: PathBuf) -> Result<(), Error> {
 pub async fn test(input: &str) -> Result<(), Error> {
 	let meta: Meta = Meta::receive(input).await?;
 
-	let dest: PathBuf = env::current_dir()?.join("video.webm");
+	// let dest: PathBuf = std::env::current_dir()?.join("video.webm");
 
-	download_file(&meta.url, dest).await?;
-
+	// download_file(&meta.url, dest).await?;
+	println!("{}", meta.mime_type.len());
 	Ok(())
 }
 
