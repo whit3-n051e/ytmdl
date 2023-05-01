@@ -4,13 +4,19 @@ extern crate tokio;
 extern crate serde_json;
 extern crate regex;
 extern crate tempfile;
+extern crate futures_core;
+extern crate futures_util;
+extern crate indicatif;
 
-use hyper::{ Client, Body, Request, Method };
+use hyper::{ Client, Body, Request, Method, HeaderMap, Response, body::Bytes };
 use hyper_tls::HttpsConnector;
-use std::{ io::{ Write, copy }, fmt::Debug, fs::File, convert::From, path::PathBuf };
+use std::{ io::Write, fmt::Debug, fs::File, convert::From, path::PathBuf, cmp::min };
 use serde_json::{ Value, json};
-use regex::{ Regex, Captures, Match };
+use regex::Regex;
 use tempfile::{ Builder, TempDir };
+use futures_core::Stream;
+use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 
 
 // Constants
@@ -22,9 +28,13 @@ const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\
 pub enum Error {
 	IoError(std::io::Error),
 	HyperError(hyper::Error),
-	FromUTF8Error(std::string::FromUtf8Error),
-	JSONError(serde_json::Error),
-	HTTPError(hyper::http::Error)
+	Utf8Error(std::string::FromUtf8Error),
+	JsonError(serde_json::Error),
+	HttpError(hyper::http::Error),
+	RegexError(regex::Error),
+	ToStrError(hyper::header::ToStrError),
+	ParseIntError(std::num::ParseIntError),
+	TemplateError(indicatif::style::TemplateError)
 }
 impl Default for Error {
 	fn default() -> Self {
@@ -43,17 +53,37 @@ impl From<hyper::Error> for Error {
 }
 impl From<std::string::FromUtf8Error> for Error {
 	fn from(err: std::string::FromUtf8Error) -> Self {
-		Self::FromUTF8Error(err)
+		Self::Utf8Error(err)
 	}
 }
 impl From<serde_json::Error> for Error {
 	fn from(err: serde_json::Error) -> Self {
-		Self::JSONError(err)
+		Self::JsonError(err)
 	}
 }
 impl From<hyper::http::Error> for Error {
 	fn from(err: hyper::http::Error) -> Self {
-		Self::HTTPError(err)
+		Self::HttpError(err)
+	}
+}
+impl From<regex::Error> for Error {
+	fn from(err: regex::Error) -> Self {
+		Self::RegexError(err)
+	}
+}
+impl From<hyper::header::ToStrError> for Error {
+	fn from(err: hyper::header::ToStrError) -> Self {
+		Self::ToStrError(err)
+	}
+}
+impl From<std::num::ParseIntError> for Error {
+	fn from(err: std::num::ParseIntError) -> Self {
+		Self::ParseIntError(err)
+	}
+}
+impl From<indicatif::style::TemplateError> for Error {
+	fn from(err: indicatif::style::TemplateError) -> Self {
+		Self::TemplateError(err)
 	}
 }
 
@@ -133,39 +163,14 @@ pub struct Meta {
 	mime_type: String,
 	url: String
 }
-#[derive(Debug)]
-pub struct RawMeta {
-	title: String,
-	streams: Vec<Value>
-}
 impl Meta {
 	pub async fn receive(input: &str) -> Result<Self, Error> {
-		let raw_meta: RawMeta = RawMeta::receive(input).await?;
-		let best_id: usize = best_stream_id(&raw_meta.streams);
-		let url: String = match raw_meta.streams[best_id].get("url").is_some() {
-			true => raw_meta.streams[best_id].grab("url"),
-			false => decipher(raw_meta.streams[best_id].grab("signatureCipher"))?
+		let vid: &str = match input.len() {
+			11 => input,
+			_ => Regex::new(VID_REGEX)?.captures(input).e()?.get(1).e()?.as_str()
 		};
+		(vid.len() != 11).e()?;
 
-		Ok(
-			Self {
-				title: raw_meta.title,
-				duration_ms: (&raw_meta.streams[best_id] as &dyn Grab<String>).grab("approxDurationMs").parse().unwrap_or_default(),
-				audio_channels: raw_meta.streams[best_id].grab("audioChannels"),
-				audio_sample_rate: (&raw_meta.streams[best_id] as &dyn Grab<String>).grab("audioSampleRate").parse().unwrap_or_default(),
-				average_bitrate: raw_meta.streams[best_id].grab("averageBitrate"),
-				bitrate: raw_meta.streams[best_id].grab("bitrate"),
-				content_length: (&raw_meta.streams[best_id] as &dyn Grab<String>).grab("contentLength").parse().unwrap_or_default(),
-				high_replication: raw_meta.streams[best_id].grab("highReplication"),
-				loudness_db: raw_meta.streams[best_id].grab("loudnessDb"),
-				mime_type: raw_meta.streams[best_id].grab("mimeType"),
-				url
-			}
-		)
-	}
-}
-impl RawMeta {
-	pub async fn receive(input: &str) -> Result<Self, Error> {
 		let vdata: Value = serde_json::from_slice(
 			&hyper::body::to_bytes(
 				Client::builder()
@@ -180,7 +185,7 @@ impl RawMeta {
 									serde_json::to_string(
 										&json!(
 											{
-												"videoId": extract_vid(input)?,
+												"videoId": vid,
 												"context": {
 													"client": {
 														"clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
@@ -205,11 +210,40 @@ impl RawMeta {
 		(video_details as &dyn Grab<bool>).grab("isLiveContent").e()?;
 		(video_details as &dyn Grab<bool>).grab("isPrivate").e()?;
 
-		let streaming_data: &Value = vdata.get("streamingData").e()?;
+		let stream: Value = {
+			let mut sid: usize = 0;
+			let mut best_bitrate_yet: u64 = 0;
+			let streams: Vec<Value> = vdata.get("streamingData").e()?.grab("adaptiveFormats");
+			for (id, strm) in streams.iter().enumerate() {
+				if strm.get("fps").is_none() && (strm as &dyn Grab<u64>).grab("audioChannels") >= 2 {
+					let bitrate: u64 = strm.grab("bitrate");
+					if bitrate > best_bitrate_yet {
+						sid = id;
+						best_bitrate_yet = bitrate;
+					}
+				}
+			};
+			streams[sid].clone()
+		};
+
+		let url: String = match stream.get("url").is_some() {
+			true => stream.grab("url"),
+			false => decipher(stream.grab("signatureCipher"))?
+		};
+
 		Ok(
 			Self {
 				title: video_details.grab("title"),
-				streams: streaming_data.grab("adaptiveFormats")
+				duration_ms: (&stream as &dyn Grab<String>).grab("approxDurationMs").parse().unwrap_or_default(),
+				audio_channels: stream.grab("audioChannels"),
+				audio_sample_rate: (&stream as &dyn Grab<String>).grab("audioSampleRate").parse().unwrap_or_default(),
+				average_bitrate: stream.grab("averageBitrate"),
+				bitrate: stream.grab("bitrate"),
+				content_length: (&stream as &dyn Grab<String>).grab("contentLength").parse().unwrap_or_default(),
+				high_replication: stream.grab("highReplication"),
+				loudness_db: stream.grab("loudnessDb"),
+				mime_type: stream.grab("mimeType"),
+				url
 			}
 		)
 	}
@@ -247,33 +281,6 @@ pub async fn get_meta(input: &str) {
 }
 
 // Calc functions
-pub fn extract_vid(url: &str) -> Result<&str, Error> {
-	if url.len() == 11 {
-		return Ok(url);
-	}
-	let vid_regex: Regex = Regex::new(VID_REGEX).unwrap();
-	let vid_cap: Captures = vid_regex.captures(url).e()?;
-	let vid_match: Match = vid_cap.get(1).e()?;
-	let vid: &str = vid_match.as_str();
-	match vid.len() {
-		11 => Ok(vid),
-		_ => Err(Error::default())
-	}
-}
-pub fn best_stream_id(streams: &[Value]) -> usize {
-	let mut best_id: usize = 0;
-	let mut best_bitrate_yet: u64 = 0;
-	for (id, strm) in streams.iter().enumerate() {
-		if strm.get("audioQuality").is_some() && (strm as &dyn Grab<u64>).grab("audioChannels") >= 2 {
-			let bitrate: u64 = strm.grab("bitrate");
-			if bitrate > best_bitrate_yet {
-				best_id = id;
-				best_bitrate_yet = bitrate;
-			}
-		}
-	};
-	best_id
-}
 pub fn decipher(cipher: String) -> Result<String, Error> {
 	(cipher == String::new()).e()?;
 	todo!();
@@ -282,35 +289,49 @@ pub fn temp_dir() -> Result<PathBuf, Error> {
 	let tmp_dir: TempDir = Builder::new().prefix("ytmdl").tempdir()?;
 	Ok(tmp_dir.path().join("tmp.bin"))
 }
-
-pub async fn download_file(url: &str, dest: PathBuf) -> Result<(), Error> {
-	let content: Vec<u8> = hyper::body::to_bytes(
-		Client::builder()
-			.build::<_, Body>(HttpsConnector::new())
-				.request(
-					Request::builder()
-						.method(Method::GET)
-						.uri(url)
-						.header("User-Agent", "")
-						.body(Body::empty())?
-				)
-					.await?
-					.into_body()
-	)
-		.await?
-		.to_vec();
-	copy(&mut content.as_slice(), &mut File::create(dest)?)?;
-	Ok(())
+pub fn stream(res: Response<Body>) -> impl Stream<Item = Result<Bytes, hyper::Error>> {
+	res.into_body()
 }
 
-// Under development
-pub async fn test(input: &str) -> Result<(), Error> {
-	let meta: Meta = Meta::receive(input).await?;
+pub async fn download_file(url: &str, dest: PathBuf) -> Result<(), Error> {
+	let response: Response<Body> = Client::builder()
+		.build::<_, Body>(HttpsConnector::new())
+		.request(
+			Request::builder()
+			.method(Method::GET)
+			.uri(url)
+			.header("user-agent", "")
+			.body(Body::empty())?
+		)
+			.await?;
+	let headers: &HeaderMap = &response.headers().to_owned();
+	let mut stream = stream(response);
 
-	// let dest: PathBuf = std::env::current_dir()?.join("video.webm");
+	let mut file: File = File::create(
+		dest.join(
+			String::from("video") + headers.get("content-type").e()?.to_str()?.split('/').last().e()?
+		)
+	)?;
 
-	// download_file(&meta.url, dest).await?;
-	println!("{}", meta.mime_type.len());
+	let size: u64 = headers.get("content-length").e()?.to_str()?.parse()?;
+	let mut downloaded: u64 = 0;
+
+	let pb: ProgressBar = ProgressBar::new(size);
+	pb.set_style(
+		ProgressStyle::default_bar()
+			.template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+			.progress_chars("#>-")
+	);
+	pb.set_message("Downloading...");
+
+	while let Some(item) = stream.next().await {
+		let chunk: Bytes = item?;
+		file.write_all(&chunk)?;
+		downloaded = min(downloaded + (chunk.len() as u64), size);
+		pb.set_position(downloaded);
+	}
+
+	pb.finish_with_message("Download complete.");
 	Ok(())
 }
 
@@ -319,10 +340,6 @@ pub async fn test(input: &str) -> Result<(), Error> {
 TO DO:
 
 - Better error handling
-- Less structs
-- Less heap allocations
-- Less functions
-- Cleaner code
 - Get audio extensions
 - Add deciphering
 - Add progressbar

@@ -6,7 +6,6 @@ extern crate hyper;
 use serde_json::json;
 #[allow(unused_imports)]
 use ytmdl::{
-    test,
     get_meta
 };
 
@@ -15,5 +14,5 @@ use ytmdl::{
 
 #[tokio::main]
 async fn main() {
-    test("https://www.youtube.com/watch?v=ZBh_mQl-2SQ").await.expect("msg");
+    println!("{:?}", "audio/webm".split('/').last())
 }
