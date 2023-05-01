@@ -151,17 +151,17 @@ impl Grab<Vec<Value>> for Value {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct Meta {
-	title: String,
-	duration_ms: u64,
-	audio_channels: u64,
-	audio_sample_rate: u64,
-	average_bitrate: u64,
-	bitrate: u64,
-	content_length: u64,
-	high_replication: bool,
-	loudness_db: f64,
-	mime_type: String,
-	url: String
+	pub title: String,
+	pub duration_ms: u64,
+	pub audio_channels: u64,
+	pub audio_sample_rate: u64,
+	pub average_bitrate: u64,
+	pub bitrate: u64,
+	pub content_length: u64,
+	pub high_replication: bool,
+	pub loudness_db: f64,
+	pub mime_type: String,
+	pub url: String
 }
 impl Meta {
 	pub async fn receive(input: &str) -> Result<Self, Error> {
@@ -293,7 +293,7 @@ pub fn stream(res: Response<Body>) -> impl Stream<Item = Result<Bytes, hyper::Er
 	res.into_body()
 }
 
-pub async fn download_file(url: &str, dest: PathBuf) -> Result<(), Error> {
+pub async fn download_file(url: String, title: String, dest: PathBuf) -> Result<(), Error> {
 	let response: Response<Body> = Client::builder()
 		.build::<_, Body>(HttpsConnector::new())
 		.request(
@@ -309,14 +309,14 @@ pub async fn download_file(url: &str, dest: PathBuf) -> Result<(), Error> {
 
 	let mut file: File = File::create(
 		dest.join(
-			String::from("video") + headers.get("content-type").e()?.to_str()?.split('/').last().e()?
+			title + "." + headers.get("content-type").e()?.to_str()?.split('/').last().e()?
 		)
 	)?;
 
-	let size: u64 = headers.get("content-length").e()?.to_str()?.parse()?;
+	let filesize: u64 = headers.get("content-length").e()?.to_str()?.parse()?;
 	let mut downloaded: u64 = 0;
 
-	let pb: ProgressBar = ProgressBar::new(size);
+	let pb: ProgressBar = ProgressBar::new(filesize);
 	pb.set_style(
 		ProgressStyle::default_bar()
 			.template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
@@ -327,7 +327,7 @@ pub async fn download_file(url: &str, dest: PathBuf) -> Result<(), Error> {
 	while let Some(item) = stream.next().await {
 		let chunk: Bytes = item?;
 		file.write_all(&chunk)?;
-		downloaded = min(downloaded + (chunk.len() as u64), size);
+		downloaded = min::<u64>(downloaded + (chunk.len() as u64), filesize);
 		pb.set_position(downloaded);
 	}
 
@@ -342,6 +342,5 @@ TO DO:
 - Better error handling
 - Get audio extensions
 - Add deciphering
-- Add progressbar
 
 */

@@ -14,5 +14,6 @@ use ytmdl::{
 
 #[tokio::main]
 async fn main() {
-    println!("{:?}", "audio/webm".split('/').last())
+    let meta: ytmdl::Meta = ytmdl::Meta::receive("https://www.youtube.com/watch?v=ZBh_mQl-2SQ").await.unwrap();
+    ytmdl::download_file(meta.url, String::from("test"), std::env::current_dir().unwrap()).await.unwrap();
 }
