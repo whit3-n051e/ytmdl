@@ -8,16 +8,15 @@ extern crate futures_core;
 extern crate futures_util;
 extern crate indicatif;
 
-use hyper::{ Client, Body, Request, Method, HeaderMap, Response, body::Bytes };
+use hyper::{ Client, Body, Request, Method, HeaderMap, body::Bytes };
 use hyper_tls::HttpsConnector;
 use std::{ io::Write, fmt::Debug, fs::File, convert::From, path::PathBuf, cmp::min };
-use serde_json::{ Value, json};
+use serde_json::{ Value, json };
 use regex::Regex;
-use tempfile::{ Builder, TempDir };
+use tempfile::Builder;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-
 
 // Constants
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
@@ -87,6 +86,7 @@ impl From<indicatif::style::TemplateError> for Error {
 	}
 }
 
+// Making non-errors errors
 pub trait Erroneous<T> {
 	fn e(self) -> Result<T, Error>;
 }
@@ -147,6 +147,40 @@ impl Grab<Vec<Value>> for Value {
 	}
 }
 
+#[allow(dead_code)]
+pub struct Response {
+	head: HeaderMap,
+	body: Body
+}
+impl Response {
+	pub async fn receive(method: Method, url: String, body: Body) -> Result<Self, Error> {
+		let response = Client::builder()
+			.build::<_, Body>(HttpsConnector::new())
+			.request(
+				Request::builder()
+					.method(method)
+					.uri(url)
+					.header("user-agent", "")
+					.body(body)?
+			)
+				.await?;
+		Ok(
+			Self {
+				head: response.headers().to_owned(),
+				body: response.into_body()
+			}
+		)
+	}
+
+	pub fn stream(self) -> impl Stream<Item = Result<Bytes, hyper::Error>> {
+		self.body
+	}
+
+	pub async fn to_json(self) -> Result<Value, Error> {
+		Ok(serde_json::from_slice(&hyper::body::to_bytes(self.body).await?)?)
+	}
+}
+
 // Structs
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -160,60 +194,56 @@ pub struct Meta {
 	pub content_length: u64,
 	pub high_replication: bool,
 	pub loudness_db: f64,
-	pub mime_type: String,
+	pub filetype: String,
+	pub codec: String,
 	pub url: String
 }
 impl Meta {
-	pub async fn receive(input: &str) -> Result<Self, Error> {
+	pub async fn get(input: &str) -> Result<Self, Error> {
+
+		// Get video id from url
 		let vid: &str = match input.len() {
 			11 => input,
 			_ => Regex::new(VID_REGEX)?.captures(input).e()?.get(1).e()?.as_str()
 		};
 		(vid.len() != 11).e()?;
 
-		let vdata: Value = serde_json::from_slice(
-			&hyper::body::to_bytes(
-				Client::builder()
-					.build::<_, Body>(HttpsConnector::new())
-					.request(
-					Request::builder()
-							.method(Method::POST)
-							.uri(format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY))
-							.header("user-agent", "")
-							.body(
-								Body::from(
-									serde_json::to_string(
-										&json!(
-											{
-												"videoId": vid,
-												"context": {
-													"client": {
-														"clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-														"clientVersion": "2.0"
-													},
-													"thirdParty": {
-														"embedUrl": "https://www.youtube.com"
-													}
-												}
-											}
-										)
-									)?
-								)
-							)?
-					).await?
-					.into_body()
-			).await?
-		)?;
+		// Receive raw video metadata
+		let vdata: Value = Response::receive(
+			Method::POST,
+			format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY),
+			Body::from(serde_json::to_string(
+				&json!({
+					"videoId": vid,
+					"context": {
+						"client": {
+							"clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+							"clientVersion": "2.0"
+						},
+						"thirdParty": {
+							"embedUrl": "https://www.youtube.com"
+						}
+					}
+				}))?
+			)
+		)
+			.await?
+			.to_json()
+			.await?;
 
+		// Check if video is a livestream or private
 		let video_details: &Value = vdata.get("videoDetails").e()?;
-
 		(video_details as &dyn Grab<bool>).grab("isLiveContent").e()?;
 		(video_details as &dyn Grab<bool>).grab("isPrivate").e()?;
 
+		// Get best stream
 		let stream: Value = {
 			let mut sid: usize = 0;
 			let mut best_bitrate_yet: u64 = 0;
-			let streams: Vec<Value> = vdata.get("streamingData").e()?.grab("adaptiveFormats");
+			let streams: Vec<Value> = vdata
+				.get("streamingData")
+				.e()?
+				.grab("adaptiveFormats");
 			for (id, strm) in streams.iter().enumerate() {
 				if strm.get("fps").is_none() && (strm as &dyn Grab<u64>).grab("audioChannels") >= 2 {
 					let bitrate: u64 = strm.grab("bitrate");
@@ -226,10 +256,21 @@ impl Meta {
 			streams[sid].clone()
 		};
 
+		// See if the video download url signed, decipher if yes
 		let url: String = match stream.get("url").is_some() {
 			true => stream.grab("url"),
 			false => decipher(stream.grab("signatureCipher"))?
 		};
+
+		// Get filetype and codec from mimeType
+		let mt_regex: regex::Captures = Regex::new(r"(\w+)/(\w+);\scodecs=\W(\w+)\W")
+			.unwrap()
+			.captures(
+				stream.get("mimeType")
+				.e()?
+				.as_str()
+				.e()?
+			).expect("msg");
 
 		Ok(
 			Self {
@@ -242,14 +283,60 @@ impl Meta {
 				content_length: (&stream as &dyn Grab<String>).grab("contentLength").parse().unwrap_or_default(),
 				high_replication: stream.grab("highReplication"),
 				loudness_db: stream.grab("loudnessDb"),
-				mime_type: stream.grab("mimeType"),
+				filetype: String::from(mt_regex.get(2).e()?.as_str()),
+				codec: String::from(mt_regex.get(3).e()?.as_str()),
 				url
 			}
 		)
 	}
+
+	pub async fn download(self, to_tmp: bool) -> Result<PathBuf, Error> {
+
+		// Decide if to download to temp folder or current folder
+		let dest: PathBuf = match to_tmp {
+			false => std::env::current_dir()?,
+			true => Builder::new().prefix("ytmdl").tempdir()?.into_path()
+		};
+
+		// Get response from download url
+		let response: Response = Response::receive(Method::GET, self.url, Body::empty()).await?;
+
+		// Create the file to save the video
+		let mut file: File = File::create(dest.join(self.title + "." + &self.filetype))?;
+
+		// Get size of the video
+		let filesize: u64 = response
+			.head
+			.get("content-length")
+			.e()?
+			.to_str()?
+			.parse()?;
+		let mut stream = response.stream();
+
+		// Set progress bar
+		let mut downloaded: u64 = 0;
+		let pb: ProgressBar = ProgressBar::new(filesize);
+		pb.set_style(
+			ProgressStyle::default_bar()
+				.template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+				.progress_chars("#>-")
+		);
+		pb.set_message("Downloading...");
+
+		// Download/Update cycle
+		while let Some(item) = stream.next().await {
+			let chunk: Bytes = item?;
+			file.write_all(&chunk)?;
+			downloaded = min::<u64>(downloaded + (chunk.len() as u64), filesize);
+			pb.set_position(downloaded);
+		}
+
+		// Finish
+		pb.finish_with_message("Download complete.");
+		Ok(dest)
+	}
 }
 
-// Debug functions
 pub fn log<T: Debug>(content: T, filename: &str) {
 	let str: String = format!("{:#?}", content);
 	let content: &[u8] = str.as_bytes();
@@ -272,68 +359,14 @@ pub fn log<T: Debug>(content: T, filename: &str) {
 		Err(_) => println!("LOG: Could not sync.")
 	};
 }
-pub async fn get_meta(input: &str) {
-	let meta: Meta = match Meta::receive(input).await {
-		Ok(val) => val,
-		Err(_) => {println!("Could not get meta"); return}
-	};
-	log(meta, "meta.txt");
-}
-
-// Calc functions
 pub fn decipher(cipher: String) -> Result<String, Error> {
 	(cipher == String::new()).e()?;
 	todo!();
 }
-pub fn temp_dir() -> Result<PathBuf, Error> {
-	let tmp_dir: TempDir = Builder::new().prefix("ytmdl").tempdir()?;
-	Ok(tmp_dir.path().join("tmp.bin"))
-}
-pub fn stream(res: Response<Body>) -> impl Stream<Item = Result<Bytes, hyper::Error>> {
-	res.into_body()
-}
 
-pub async fn download_file(url: String, title: String, dest: PathBuf) -> Result<(), Error> {
-	let response: Response<Body> = Client::builder()
-		.build::<_, Body>(HttpsConnector::new())
-		.request(
-			Request::builder()
-			.method(Method::GET)
-			.uri(url)
-			.header("user-agent", "")
-			.body(Body::empty())?
-		)
-			.await?;
-	let headers: &HeaderMap = &response.headers().to_owned();
-	let mut stream = stream(response);
+// ------ UNDER DEVELOPMENT ------
 
-	let mut file: File = File::create(
-		dest.join(
-			title + "." + headers.get("content-type").e()?.to_str()?.split('/').last().e()?
-		)
-	)?;
 
-	let filesize: u64 = headers.get("content-length").e()?.to_str()?.parse()?;
-	let mut downloaded: u64 = 0;
-
-	let pb: ProgressBar = ProgressBar::new(filesize);
-	pb.set_style(
-		ProgressStyle::default_bar()
-			.template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
-			.progress_chars("#>-")
-	);
-	pb.set_message("Downloading...");
-
-	while let Some(item) = stream.next().await {
-		let chunk: Bytes = item?;
-		file.write_all(&chunk)?;
-		downloaded = min::<u64>(downloaded + (chunk.len() as u64), filesize);
-		pb.set_position(downloaded);
-	}
-
-	pb.finish_with_message("Download complete.");
-	Ok(())
-}
 
 
 /*
