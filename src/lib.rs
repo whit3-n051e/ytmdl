@@ -8,7 +8,7 @@ extern crate futures_core;
 extern crate futures_util;
 extern crate indicatif;
 
-use hyper::{ Client, Body, Request, Method, HeaderMap, body::Bytes };
+use hyper::{ Client, Request, Method, HeaderMap, body::Bytes };
 use hyper_tls::HttpsConnector;
 use std::{ io::Write, fmt::Debug, fs::File, convert::From, path::PathBuf, cmp::min };
 use serde_json::{ Value, json };
@@ -17,6 +17,7 @@ use tempfile::Builder;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::ser::Serialize;
 
 // Constants
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
@@ -25,64 +26,16 @@ const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\
 // Errors
 #[derive(Debug)]
 pub enum Error {
-	IoError(std::io::Error),
-	HyperError(hyper::Error),
-	Utf8Error(std::string::FromUtf8Error),
-	JsonError(serde_json::Error),
-	HttpError(hyper::http::Error),
-	RegexError(regex::Error),
-	ToStrError(hyper::header::ToStrError),
-	ParseIntError(std::num::ParseIntError),
-	TemplateError(indicatif::style::TemplateError)
+	IoError(std::io::Error)
 }
 impl Default for Error {
 	fn default() -> Self {
 		Self::IoError(std::io::Error::from(std::io::ErrorKind::Other))
 	}
 }
-impl From<std::io::Error> for Error {
-	fn from(err: std::io::Error) -> Self {
-		Self::IoError(err)
-	}
-}
-impl From<hyper::Error> for Error {
-	fn from(err: hyper::Error) -> Self {
-		Self::HyperError(err)
-	}
-}
-impl From<std::string::FromUtf8Error> for Error {
-	fn from(err: std::string::FromUtf8Error) -> Self {
-		Self::Utf8Error(err)
-	}
-}
-impl From<serde_json::Error> for Error {
-	fn from(err: serde_json::Error) -> Self {
-		Self::JsonError(err)
-	}
-}
-impl From<hyper::http::Error> for Error {
-	fn from(err: hyper::http::Error) -> Self {
-		Self::HttpError(err)
-	}
-}
-impl From<regex::Error> for Error {
-	fn from(err: regex::Error) -> Self {
-		Self::RegexError(err)
-	}
-}
-impl From<hyper::header::ToStrError> for Error {
-	fn from(err: hyper::header::ToStrError) -> Self {
-		Self::ToStrError(err)
-	}
-}
-impl From<std::num::ParseIntError> for Error {
-	fn from(err: std::num::ParseIntError) -> Self {
-		Self::ParseIntError(err)
-	}
-}
-impl From<indicatif::style::TemplateError> for Error {
-	fn from(err: indicatif::style::TemplateError) -> Self {
-		Self::TemplateError(err)
+impl<T: std::error::Error> From<T> for Error {
+	fn from(_value: T) -> Self {
+		Self::default()
 	}
 }
 
@@ -147,21 +100,52 @@ impl Grab<Vec<Value>> for Value {
 	}
 }
 
-#[allow(dead_code)]
+// Make my own body because I can
+pub struct Body(hyper::Body);
+impl<T: Serialize> From<T> for Body {
+	fn from(value: T) -> Self {
+		Self(hyper::Body::from(serde_json::to_string(&json!(value)).unwrap()))
+	}
+}
+impl Default for Body {
+	fn default() -> Self {
+		Self(hyper::Body::empty())
+	}
+}
+impl Body {
+	pub fn for_vid(vid: &str) -> Self {
+		Self::from(
+			json!({
+				"videoId": vid,
+				"context": {
+					"client": {
+						"clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+						"clientVersion": "2.0"
+					},
+					"thirdParty": {
+						"embedUrl": "https://www.youtube.com"
+					}
+				}
+			})
+		)
+	}
+}
+
+// Make my own response because using reqwest is unsportsmanlike
 pub struct Response {
 	head: HeaderMap,
-	body: Body
+	body: hyper::Body
 }
 impl Response {
 	pub async fn receive(method: Method, url: String, body: Body) -> Result<Self, Error> {
 		let response = Client::builder()
-			.build::<_, Body>(HttpsConnector::new())
+			.build::<_, hyper::Body>(HttpsConnector::new())
 			.request(
 				Request::builder()
 					.method(method)
 					.uri(url)
 					.header("user-agent", "")
-					.body(body)?
+					.body(body.0)?
 			)
 				.await?;
 		Ok(
@@ -182,7 +166,6 @@ impl Response {
 }
 
 // Structs
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Meta {
 	pub title: String,
@@ -196,7 +179,8 @@ pub struct Meta {
 	pub loudness_db: f64,
 	pub filetype: String,
 	pub codec: String,
-	pub url: String
+	pub url: String,
+	pub signature_cipher: String
 }
 impl Meta {
 	pub async fn get(input: &str) -> Result<Self, Error> {
@@ -212,20 +196,7 @@ impl Meta {
 		let vdata: Value = Response::receive(
 			Method::POST,
 			format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY),
-			Body::from(serde_json::to_string(
-				&json!({
-					"videoId": vid,
-					"context": {
-						"client": {
-							"clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-							"clientVersion": "2.0"
-						},
-						"thirdParty": {
-							"embedUrl": "https://www.youtube.com"
-						}
-					}
-				}))?
-			)
+			Body::for_vid(vid)
 		)
 			.await?
 			.to_json()
@@ -256,12 +227,6 @@ impl Meta {
 			streams[sid].clone()
 		};
 
-		// See if the video download url signed, decipher if yes
-		let url: String = match stream.get("url").is_some() {
-			true => stream.grab("url"),
-			false => decipher(stream.grab("signatureCipher"))?
-		};
-
 		// Get filetype and codec from mimeType
 		let mt_regex: regex::Captures = Regex::new(r"(\w+)/(\w+);\scodecs=\W(\w+)\W")
 			.unwrap()
@@ -285,12 +250,12 @@ impl Meta {
 				loudness_db: stream.grab("loudnessDb"),
 				filetype: String::from(mt_regex.get(2).e()?.as_str()),
 				codec: String::from(mt_regex.get(3).e()?.as_str()),
-				url
+				url: stream.grab("url"),
+				signature_cipher: stream.grab("signatureCipher")
 			}
 		)
 	}
-
-	pub async fn download(self, to_tmp: bool) -> Result<PathBuf, Error> {
+	pub async fn download(self, to_tmp: bool, pb: ProgressBar) -> Result<PathBuf, Error> {
 
 		// Decide if to download to temp folder or current folder
 		let dest: PathBuf = match to_tmp {
@@ -299,7 +264,7 @@ impl Meta {
 		};
 
 		// Get response from download url
-		let response: Response = Response::receive(Method::GET, self.url, Body::empty()).await?;
+		let response: Response = Response::receive(Method::GET, self.url, Body::default()).await?;
 
 		// Create the file to save the video
 		let mut file: File = File::create(dest.join(self.title + "." + &self.filetype))?;
@@ -315,7 +280,7 @@ impl Meta {
 
 		// Set progress bar
 		let mut downloaded: u64 = 0;
-		let pb: ProgressBar = ProgressBar::new(filesize);
+		pb.set_length(filesize);
 		pb.set_style(
 			ProgressStyle::default_bar()
 				.template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
@@ -335,45 +300,31 @@ impl Meta {
 		pb.finish_with_message("Download complete.");
 		Ok(dest)
 	}
+	pub fn decipher(self) -> Result<String, Error> {
+		let _cipher = match self.url.as_str() {
+			"" => match self.signature_cipher.as_str() {
+				"" => return Err(Error::default()),
+				_ => self.signature_cipher
+			},
+			_ => return Ok(self.url)
+		};
+		todo!()
+	}
 }
 
-pub fn log<T: Debug>(content: T, filename: &str) {
-	let str: String = format!("{:#?}", content);
-	let content: &[u8] = str.as_bytes();
-	let mut file: File = match File::create(filename) {
-		Ok(val) => val,
-		Err(_) => {
-			println!("LOG: Could not create file.");
-			return
-		}
-	};
-	match file.write_all(content) {
-		Ok(_) => {},
-		Err(_) => {
-			println!("LOG: Could not write to file.");
-			return
-		}
-	}
-	match file.sync_all() {
-		Ok(_) => println!("LOG: Success: {filename}"),
-		Err(_) => println!("LOG: Could not sync.")
-	};
-}
-pub fn decipher(cipher: String) -> Result<String, Error> {
-	(cipher == String::new()).e()?;
-	todo!();
-}
 
 // ------ UNDER DEVELOPMENT ------
 
 
 
 
-/*
-TO DO:
 
-- Better error handling
-- Get audio extensions
-- Add deciphering
 
+// ------------------------------
+/* TO DO:
+*
+*  - Better error handling
+*  - Add deciphering
+*  - Add converting to wav
+*
 */
