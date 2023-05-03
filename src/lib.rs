@@ -20,11 +20,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde::ser::Serialize;
 
 // Constants
+const GOOGLEAPI_URL: &str = "https://www.youtube.com/youtubei/v1/";
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\?v(?:i)?=|\&v(?:i)?=))([^#\&\?]*).*";
 
 // Errors
-#[derive(Debug)]
 pub enum Error {
 	DevError,
 	CipherError
@@ -186,7 +186,13 @@ pub struct Response {
 	body: hyper::Body
 }
 impl Response {
-	pub async fn receive(method: Method, url: String, body: Body) -> Result<Self, Error> {
+	pub async fn post(url: &str, body: Body) -> Result<Self, Error> {
+		Self::receive(Method::POST, url, body).await
+	}
+	pub async fn get(url: &str) -> Result<Self, Error> {
+		Self::receive(Method::GET, url, Body::default()).await
+	}
+	pub async fn receive(method: Method, url: &str, body: Body) -> Result<Self, Error> {
 		let response = Client::builder()
 			.build::<_, hyper::Body>(HttpsConnector::new())
 			.request(
@@ -204,11 +210,9 @@ impl Response {
 			}
 		)
 	}
-
 	pub fn stream(self) -> impl Stream<Item = Result<Bytes, hyper::Error>> {
 		self.body
 	}
-
 	pub async fn to_json(self) -> Result<Value, Error> {
 		Ok(serde_json::from_slice(&hyper::body::to_bytes(self.body).await?)?)
 	}
@@ -238,13 +242,10 @@ impl Meta {
 			_ => Regex::new(VID_REGEX)?.captures(input).e()?.get(1).e()?.as_str()
 		};
 		(vid.len() != 11).e()?;
- 
+
 		// Receive raw video metadata
-		let vdata: Value = Response::receive(
-			Method::POST,
-			format!("https://www.youtube.com/youtubei/v1/player?key={}", API_KEY),
-			Body::for_vid(vid)
-		)
+		let url = format!("{}player?key={}", GOOGLEAPI_URL, API_KEY);
+		let vdata: Value = Response::post(&url, Body::for_vid(vid))
 			.await?
 			.to_json()
 			.await?;
@@ -306,7 +307,7 @@ impl Meta {
 		};
 
 		// Get response from download url
-		let response: Response = Response::receive(Method::GET, self.url, Body::default()).await?;
+		let response: Response = Response::get(&self.url).await?;
 
 		// Create the file to save the video
 		let mut file: File = File::create(dest.join(self.title + "." + &self.filetype))?;
@@ -318,7 +319,7 @@ impl Meta {
 			.e()?
 			.to_str()?
 			.parse()?;
-		let mut stream = response.stream();
+		let mut bytestream = response.stream();
 
 		// Set progress bar
 		let mut downloaded: u64 = 0;
@@ -328,10 +329,11 @@ impl Meta {
 				.template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
 				.progress_chars("#>-")
 		);
+		pb.tick();
 		pb.set_message("Downloading...");
 
 		// Download/Update cycle
-		while let Some(item) = stream.next().await {
+		while let Some(item) = bytestream.next().await {
 			let chunk: Bytes = item?;
 			file.write_all(&chunk)?;
 			downloaded = min::<u64>(downloaded + (chunk.len() as u64), filesize);
