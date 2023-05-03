@@ -10,7 +10,7 @@ extern crate indicatif;
 
 use hyper::{ Client, Request, Method, HeaderMap, body::Bytes };
 use hyper_tls::HttpsConnector;
-use std::{ io::Write, fmt::Debug, fs::File, convert::From, path::PathBuf, cmp::min };
+use std::{ io::Write, fmt::Debug, fs::File, convert::From, path::PathBuf, cmp::min, str::FromStr };
 use serde_json::{ Value, json };
 use regex::Regex;
 use tempfile::Builder;
@@ -26,28 +26,45 @@ const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\
 // Errors
 #[derive(Debug)]
 pub enum Error {
-	IoError(std::io::Error)
-}
-impl Default for Error {
-	fn default() -> Self {
-		Self::IoError(std::io::Error::from(std::io::ErrorKind::Other))
-	}
+	DevError,
+	CipherError
 }
 impl<T: std::error::Error> From<T> for Error {
 	fn from(_value: T) -> Self {
-		Self::default()
+		Self::DevError
 	}
 }
 
 // Making non-errors errors
 pub trait Erroneous<T> {
 	fn e(self) -> Result<T, Error>;
+	fn r(self, err: Error) -> Result<T, Error>;
+}
+impl<T, E> Erroneous<T> for Result<T, E> {
+	fn e(self) -> Result<T, Error> {
+		match self {
+			Ok(val) => Ok(val),
+			Err(_) => Err(Error::DevError)
+		}
+	}
+	fn r(self, err: Error) -> Result<T, Error> {
+		match self {
+			Ok(val) => Ok(val),
+			Err(_) => Err(err)
+		}
+	}
 }
 impl<T> Erroneous<T> for Option<T> {
 	fn e(self) -> Result<T, Error> {
 		match self {
 			Some(val) => Ok(val),
-			None => Err(Error::default())
+			None => Err(Error::DevError)
+		}
+	}
+	fn r(self, err: Error) -> Result<T, Error> {
+		match self {
+			Some(val) => Ok(val),
+			None => Err(err)
 		}
 	}
 }
@@ -55,7 +72,13 @@ impl Erroneous<()> for bool {
 	fn e(self) -> Result<(), Error> {
 		match self {
 			false => Ok(()),
-			true => Err(Error::default())
+			true => Err(Error::DevError)
+		}
+	}
+	fn r(self, err: Error) -> Result<(), Error> {
+		match self {
+			false => Ok(()),
+			true => Err(err)
 		}
 	}
 }
@@ -66,37 +89,63 @@ pub trait Grab<T> {
 }
 impl Grab<bool> for Value {
 	fn grab(&self, index: &str) -> bool {
-		let default: Value = json!(false);
-		let v: &Value = self.get(index).unwrap_or(&default);
+		let def: Value = json!(false);
+		let v: &Value = self.get(index).unwrap_or(&def);
 		v.as_bool().unwrap_or_default()
 	}
 }
 impl Grab<String> for Value {
 	fn grab(&self, index: &str) -> String {
-		let default: Value = json!("");
-		let v: &Value = self.get(index).unwrap_or(&default);
+		let def: Value = json!("");
+		let v: &Value = self.get(index).unwrap_or(&def);
 		String::from(v.as_str().unwrap_or_default())
 	}
 }
 impl Grab<u64> for Value {
 	fn grab(&self, index: &str) -> u64 {
-		let default: Value = json!(0);
-		let v: &Value = self.get(index).unwrap_or(&default);
+		let def: Value = json!(0);
+		let v: &Value = self.get(index).unwrap_or(&def);
 		v.as_u64().unwrap_or_default()
 	}
 }
 impl Grab<f64> for Value {
 	fn grab(&self, index: &str) -> f64 {
-		let default: Value = json!(0.);
-		let v: &Value = self.get(index).unwrap_or(&default);
+		let def: Value = json!(0.);
+		let v: &Value = self.get(index).unwrap_or(&def);
 		v.as_f64().unwrap_or_default()
 	}
 }
 impl Grab<Vec<Value>> for Value {
 	fn grab(&self, index: &str) -> Vec<Value> {
-		let default: Value = json!([]);
-		let v: &Value = self.get(index).unwrap_or(&default);
-		v.as_array().unwrap().to_owned()
+		let def: Value = json!([]);
+		let def2: Vec<Value> = Vec::new();
+		let v: &Value = self.get(index).unwrap_or(&def);
+		v.as_array().unwrap_or(&def2).to_owned()
+	}
+}
+
+pub trait Parse<T> {
+	fn parse(&self, key: &str) -> T;
+}
+impl<T: FromStr + Default> Parse<T> for Value {
+	fn parse(&self, key: &str) -> T {
+		(self as &dyn Grab<String>).grab(key).parse::<T>().unwrap_or_default()
+	}
+}
+
+pub trait Decipher {
+	fn decipher(&self) -> Result<String, Error>;
+}
+impl Decipher for Value {
+	fn decipher(&self) -> Result<String, Error> {
+		let _cipher: String = match self.get("url") {
+			Some(val) => return Ok(val.as_str().e()?.to_owned()),
+			None => match self.get("signatureCipher") {
+				Some(val) => val.as_str().e()?.to_owned(),
+				None => return Err(Error::CipherError)
+			}
+		};
+		todo!()
 	}
 }
 
@@ -179,19 +228,17 @@ pub struct Meta {
 	pub loudness_db: f64,
 	pub filetype: String,
 	pub codec: String,
-	pub url: String,
-	pub signature_cipher: String
+	pub url: String
 }
 impl Meta {
 	pub async fn get(input: &str) -> Result<Self, Error> {
-
 		// Get video id from url
 		let vid: &str = match input.len() {
 			11 => input,
 			_ => Regex::new(VID_REGEX)?.captures(input).e()?.get(1).e()?.as_str()
 		};
 		(vid.len() != 11).e()?;
-
+ 
 		// Receive raw video metadata
 		let vdata: Value = Response::receive(
 			Method::POST,
@@ -228,35 +275,30 @@ impl Meta {
 		};
 
 		// Get filetype and codec from mimeType
+		let mt: String = stream.grab("mimeType");
 		let mt_regex: regex::Captures = Regex::new(r"(\w+)/(\w+);\scodecs=\W(\w+)\W")
 			.unwrap()
-			.captures(
-				stream.get("mimeType")
-				.e()?
-				.as_str()
-				.e()?
-			).expect("msg");
+			.captures(mt.as_str())
+			.e()?;
 
 		Ok(
 			Self {
 				title: video_details.grab("title"),
-				duration_ms: (&stream as &dyn Grab<String>).grab("approxDurationMs").parse().unwrap_or_default(),
+				duration_ms: stream.parse("approxDurationMs"),
 				audio_channels: stream.grab("audioChannels"),
-				audio_sample_rate: (&stream as &dyn Grab<String>).grab("audioSampleRate").parse().unwrap_or_default(),
+				audio_sample_rate: stream.parse("audioSampleRate"),
 				average_bitrate: stream.grab("averageBitrate"),
 				bitrate: stream.grab("bitrate"),
-				content_length: (&stream as &dyn Grab<String>).grab("contentLength").parse().unwrap_or_default(),
+				content_length: stream.parse("contentLength"),
 				high_replication: stream.grab("highReplication"),
 				loudness_db: stream.grab("loudnessDb"),
 				filetype: String::from(mt_regex.get(2).e()?.as_str()),
 				codec: String::from(mt_regex.get(3).e()?.as_str()),
-				url: stream.grab("url"),
-				signature_cipher: stream.grab("signatureCipher")
+				url: stream.decipher()?
 			}
 		)
 	}
 	pub async fn download(self, to_tmp: bool, pb: ProgressBar) -> Result<PathBuf, Error> {
-
 		// Decide if to download to temp folder or current folder
 		let dest: PathBuf = match to_tmp {
 			false => std::env::current_dir()?,
@@ -299,16 +341,6 @@ impl Meta {
 		// Finish
 		pb.finish_with_message("Download complete.");
 		Ok(dest)
-	}
-	pub fn decipher(self) -> Result<String, Error> {
-		let _cipher = match self.url.as_str() {
-			"" => match self.signature_cipher.as_str() {
-				"" => return Err(Error::default()),
-				_ => self.signature_cipher
-			},
-			_ => return Ok(self.url)
-		};
-		todo!()
 	}
 }
 
