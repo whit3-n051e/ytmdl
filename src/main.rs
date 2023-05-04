@@ -34,20 +34,14 @@ pub fn log<T: Debug>(content: T, filename: &str) {
 
 #[tokio::main]
 async fn main() {
-    //let meta: ytmdl::Meta = ytmdl::Meta::get("https://www.youtube.com/watch?v=ZBh_mQl-2SQ").await.unwrap();
-    //ytmdl::download_file(meta.url, String::from("test"), std::env::current_dir().unwrap()).await.unwrap();
-    //ytmdl::log(meta, "meta2.txt")
-    let pb = indicatif::ProgressBar::new(0);
+	let url: &str = "https://www.youtube.com/watch?v=ZBh_mQl-2SQ";
+    let pb: indicatif::ProgressBar = indicatif::ProgressBar::new(0);
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
             .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.red/blue}])").unwrap()
             .progress_chars("->-")
     );
-    pb.set_message("msg");
-    println!("e");
-    /*
-    let s: &str = "audio/webm; codecs=\"opus\"";
-    let a = Regex::new(r"(\w+)/(\w+);\scodecs=\W(\w+)\W").unwrap().captures(s).expect("msg");
-    println!("{:#?}", a);
-    */
+    pb.set_message("Loading meta...");
+	let meta: ytmdl::Meta = ytmdl::Meta::get(url).await.unwrap();
+	log(meta, "meta3.txt");
 }

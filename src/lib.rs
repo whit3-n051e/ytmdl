@@ -8,7 +8,7 @@ extern crate futures_core;
 extern crate futures_util;
 extern crate indicatif;
 
-use hyper::{ Client, Request, Method, HeaderMap, body::Bytes };
+use hyper::{ Client, Request, Method, HeaderMap, body::Bytes, http::HeaderValue };
 use hyper_tls::HttpsConnector;
 use std::{ io::Write, fmt::Debug, fs::File, convert::From, path::PathBuf, cmp::min, str::FromStr };
 use serde_json::{ Value, json };
@@ -24,14 +24,52 @@ const GOOGLEAPI_URL: &str = "https://www.youtube.com/youtubei/v1/";
 const API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const VID_REGEX: &str = r"^.*(?:(?:youtu\.be/|v/|vi/|u/w/|embed/)|(?:(?:watch)?\?v(?:i)?=|\&v(?:i)?=))([^#\&\?]*).*";
 
+// Error messages
+const DEV_EMSG: ErrorMessage = ErrorMessage {
+	id: "",
+	info: ""
+};
+const CIPHER_EMSG: ErrorMessage = ErrorMessage {
+	id: "",
+	info: ""
+};
+
+// Error message struct
+#[derive(Debug)]
+pub struct ErrorMessage {
+	id: &'static str,
+	info: &'static str
+}
+impl ErrorMessage {
+	fn report(self) {
+		println!("*** ERROR ***\nID: {}\n{}", self.id, self.info)
+	}
+}
+
 // Errors
+#[derive(Debug)]
 pub enum Error {
 	DevError,
 	CipherError
 }
 impl<T: std::error::Error> From<T> for Error {
-	fn from(_value: T) -> Self {
+	fn from(_err: T) -> Self {
 		Self::DevError
+	}
+}
+
+pub trait Report {
+	fn report(self);
+}
+impl Report for Result<(), Error> {
+	fn report(self) {
+		match self {
+			Ok(()) => (),
+			Err(err) => match err {
+				Error::DevError => DEV_EMSG.report(),
+				Error::CipherError => CIPHER_EMSG.report()
+			}
+		}
 	}
 }
 
@@ -89,38 +127,60 @@ pub trait Grab<T> {
 }
 impl Grab<bool> for Value {
 	fn grab(&self, index: &str) -> bool {
-		let def: Value = json!(false);
-		let v: &Value = self.get(index).unwrap_or(&def);
+		let v: Value = self.get(index).not_empty();
 		v.as_bool().unwrap_or_default()
 	}
 }
 impl Grab<String> for Value {
 	fn grab(&self, index: &str) -> String {
-		let def: Value = json!("");
-		let v: &Value = self.get(index).unwrap_or(&def);
+		let v: Value = self.get(index).not_empty();
 		String::from(v.as_str().unwrap_or_default())
 	}
 }
 impl Grab<u64> for Value {
 	fn grab(&self, index: &str) -> u64 {
-		let def: Value = json!(0);
-		let v: &Value = self.get(index).unwrap_or(&def);
-		v.as_u64().unwrap_or_default()
+		let v: Value = self.get(index).not_empty();
+		v.as_u64().unwrap()
 	}
 }
 impl Grab<f64> for Value {
 	fn grab(&self, index: &str) -> f64 {
-		let def: Value = json!(0.);
-		let v: &Value = self.get(index).unwrap_or(&def);
+		let v: Value = self.get(index).not_empty();
 		v.as_f64().unwrap_or_default()
 	}
 }
 impl Grab<Vec<Value>> for Value {
 	fn grab(&self, index: &str) -> Vec<Value> {
-		let def: Value = json!([]);
-		let def2: Vec<Value> = Vec::new();
-		let v: &Value = self.get(index).unwrap_or(&def);
-		v.as_array().unwrap_or(&def2).to_owned()
+		let v: Value = self.get(index).not_empty();
+		v.as_array().not_empty()
+	}
+}
+
+pub trait NotEmpty<T> {
+	fn not_empty(self) -> T;
+}
+impl NotEmpty<Value> for Option<&Value> {
+	fn not_empty(self) -> Value {
+		match self {
+			Some(val) => val.to_owned(),
+			None => json!({})
+		}
+	}
+}
+impl NotEmpty<Vec<Value>> for Option<&Vec<Value>> {
+	fn not_empty(self) -> Vec<Value> {
+		match self {
+			Some(val) => val.to_owned(),
+			None => Vec::new() as Vec<Value>
+		}
+	}
+}
+impl NotEmpty<HeaderValue> for Option<&HeaderValue> {
+	fn not_empty(self) -> HeaderValue {
+		match self {
+			Some(val) => val.to_owned(),
+			None => HeaderValue::from(0)
+		}
 	}
 }
 
@@ -129,10 +189,25 @@ pub trait Parse<T> {
 }
 impl<T: FromStr + Default> Parse<T> for Value {
 	fn parse(&self, key: &str) -> T {
-		(self as &dyn Grab<String>).grab(key).parse::<T>().unwrap_or_default()
+		(self as &dyn Grab<String>)
+			.grab(key)
+			.parse::<T>()
+			.unwrap_or_default()
+	}
+}
+impl<T: FromStr + Default> Parse<T> for HeaderMap {
+	fn parse(&self, key: &str) -> T {
+		self
+			.get(key)
+			.not_empty()
+			.to_str()
+			.unwrap_or_default()
+			.parse::<T>()
+			.unwrap_or_default()
 	}
 }
 
+// DECIPHERING
 pub trait Decipher {
 	fn decipher(&self) -> Result<String, Error>;
 }
@@ -244,7 +319,7 @@ impl Meta {
 		(vid.len() != 11).e()?;
 
 		// Receive raw video metadata
-		let url = format!("{}player?key={}", GOOGLEAPI_URL, API_KEY);
+		let url: String = format!("{}player?key={}", GOOGLEAPI_URL, API_KEY);
 		let vdata: Value = Response::post(&url, Body::for_vid(vid))
 			.await?
 			.to_json()
@@ -315,10 +390,7 @@ impl Meta {
 		// Get size of the video
 		let filesize: u64 = response
 			.head
-			.get("content-length")
-			.e()?
-			.to_str()?
-			.parse()?;
+			.parse("content-length");
 		let mut bytestream = response.stream();
 
 		// Set progress bar
@@ -357,8 +429,8 @@ impl Meta {
 // ------------------------------
 /* TO DO:
 *
-*  - Better error handling
-*  - Add deciphering
-*  - Add converting to wav
+*  - Error handling
+*  - Deciphering
+*  - Converting to wav
 *
 */
