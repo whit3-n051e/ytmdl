@@ -429,7 +429,6 @@ impl Meta {
 // ------------------------------
 /* TO DO:
 *
-*  - Error handling
 *  - Deciphering
 *  - Converting to wav
 *
